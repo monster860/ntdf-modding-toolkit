@@ -1,4 +1,5 @@
 import Blob from "cross-blob";
+import { GridChunk } from "../chunks/grid.js";
 
 export enum ChunkType {
 	EOF = 0,
@@ -8,14 +9,15 @@ export enum ChunkType {
 	Collision = 5,
 	ModelList = 8,
 	DynamicModel = 12,
-	WorldGrid = 13,
-	Floors = 19,
+	Model = 13,
+	WorldGrid = 19,
+	DynamicObjects = 29,
 	ShadowModel = 33,
 	ZoneVis = 35,
 	LevelDLL = 37,
 	Table = 42,
 	DialogueTable = 1000
-} // 25 22 26 23 27 24
+}
 
 export class ChunkFile {
 	constructor(public chunks : Chunk[]) {
@@ -69,6 +71,11 @@ export class ChunkFile {
 		throw new Error("Chunk of type " + type + " not found with id " + id);
 	}
 
+	delete_chunk(chunk : Chunk) {
+		let index = this.chunks.indexOf(chunk);
+		if(index >= 0) this.chunks.splice(index, 1);
+	}
+
 	to_blob() : Blob {
 		let pieces : Array<Blob|ArrayBuffer> = [];
 		let offset = 0;
@@ -85,6 +92,26 @@ export class ChunkFile {
 			0x00, 0x00, 0x00, 0x00
 		]).buffer);
 		return new Blob(pieces);
+	}
+
+	/**
+	 * Rebuilds the collision world grid. Use after modifying collision. See {@link GridChunk.rebuild}
+	 */
+	async rebuild_grid() {
+		let grid_chunk : Chunk|undefined = undefined;
+		for(let chunk of this.chunks) {
+			if(chunk.type == ChunkType.WorldGrid) {
+				grid_chunk = chunk;
+				break;
+			}
+		}
+		if(!grid_chunk) {
+			throw new Error("Cannot rebuild grid - no grid to rebuid");
+		}
+
+		let grid = await GridChunk.from_blob(grid_chunk.contents);
+		await grid.rebuild(this);
+		grid_chunk.contents = grid.to_blob();
 	}
 }
 

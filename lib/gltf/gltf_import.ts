@@ -1,4 +1,5 @@
 import assert from "assert";
+import { CollisionChunk } from "../chunks/collision.js";
 import { MaterialsChunk, ShaderType } from "../chunks/materials.js";
 import { ModelChunk, ModelNode, ModelNodeEmpty, ModelNodeLodGroup, ModelNodeMesh, ModelNodeType, ModelNodeZoneGroup } from "../chunks/model.js";
 import { GsColorParam } from "../ps2/gs_constants.js";
@@ -6,8 +7,13 @@ import { VifCode, VifCodeType } from "../ps2/vifcode.js";
 import { apply_matrix, identity_matrix, insert_bits, linear_to_srgb, Matrix, matrix_multiply, srgb_to_linear, transform_to_matrix, Vec3, Vec4 } from "../utils/misc.js";
 import { GlTf, MeshPrimitive, Node } from "./gltf.js";
 
-export function import_gltf(glb_buffer : ArrayBuffer, materials : MaterialsChunk) : ModelChunk {
-	return new GlTfImporter(glb_buffer, materials).model;
+interface GltfImport {
+	model : ModelChunk;
+	collision? : CollisionChunk;
+}
+
+export function import_gltf(glb_buffer : ArrayBuffer, materials : MaterialsChunk) : GltfImport {
+	return new GlTfImporter(glb_buffer, materials).output;
 }
 
 class GlTfImporter {
@@ -15,11 +21,12 @@ class GlTfImporter {
 	gltf : GlTf;
 	glb_dv : DataView;
 	binary_offset : number;
-	model : ModelChunk;
 	root : ModelNodeEmpty;
 	id_ctr = 0;
 	scene_nodes : number[];
 	all_nodes : Node[];
+
+	output : GltfImport;
 
 	constructor(glb_buffer : ArrayBuffer, materials : MaterialsChunk) {
 		this.materials = materials;
@@ -56,8 +63,8 @@ class GlTfImporter {
 			radius: 0,
 			type: ModelNodeType.Empty,
 			render_distance: 1e4
-		}
-		this.model = new ModelChunk(this.root);
+		};
+		this.output = {model: new ModelChunk(this.root)};
 
 		assert(gltf.scenes, "This glTF file is missing a scene!");
 		let scene = gltf.scenes[gltf.scene ?? 0];
@@ -107,8 +114,6 @@ class GlTfImporter {
 			}
 			zone.children.sort()
 		}
-
-		console.log("Average strip length: " + (this.total_strip_length / this.total_strips).toFixed(2));
 
 		this.propogate_attributes(this.root);
 	}

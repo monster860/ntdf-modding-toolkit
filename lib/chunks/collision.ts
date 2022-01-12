@@ -185,6 +185,9 @@ export class CollisionChunk {
 		let reservations = new Map<CollisionObject|CollisionBoundary|Array<number[]|undefined>|number[], number>();
 		let total_length = 0x10 + this.objects.length * 4;
 		for(let object of this.objects) {
+			// I prefer to have very specific offsets here, 
+			// consistent with the original game to reduce interdependency with the grid 
+			// chunk, rather than try to optimize this down.
 			total_length = Math.ceil(total_length / 0x10) * 0x10;
 			reservations.set(object, total_length);
 			total_length += 0x60;
