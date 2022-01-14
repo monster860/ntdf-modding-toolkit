@@ -24,7 +24,7 @@ export class ImageChunk {
 	 * @param locations A list of locations within the image file
 	 * @param base The default base address within the GS memory to write the image data to. Usually 0, but is set to 0x2a00 in fullscreen images and in the frontend data icon file.
 	 */
-	constructor(public width : number, public height : number, public locations : ImageLocation[] = [], public data : Uint8Array = new Uint8Array(width*height*4), public base = 0) {
+	constructor(public width : number = 128, public height : number = 128, public locations : ImageLocation[] = [], public data : Uint8Array = new Uint8Array(width*height*4), public base = 0) {
 		assert.strictEqual(width % 128, 0);
 	}
 

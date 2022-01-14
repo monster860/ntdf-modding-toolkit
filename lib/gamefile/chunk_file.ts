@@ -12,11 +12,13 @@ export enum ChunkType {
 	Model = 13,
 	WorldGrid = 19,
 	DynamicObjects = 29,
+	Header = 31,
 	ShadowModel = 33,
 	ZoneVis = 35,
 	LevelDLL = 37,
 	Table = 42,
-	DialogueTable = 1000
+	DialogueTable = 1000,
+	WorldInfo = 1001,
 }
 
 export class ChunkFile {

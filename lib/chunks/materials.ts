@@ -212,7 +212,7 @@ export class MaterialsChunk {
 					}
 					let pass = material.passes[k];
 					dv.setInt16(info_ptr + 0x14 + 0x10*k, pass.shader_type, true);
-					dv.setInt16(info_ptr + 0x18 + 0x10*k, 0x27, true);
+					dv.setInt16(info_ptr + 0x18 + 0x10*k, (pass.scroll_rate_x || pass.scroll_rate_y) ? 0x23 : 0x27, true);
 					dv.setInt16(info_ptr + 0x1C + 0x10*k, pass.metallic ? 1 : 2, true);
 
 					dv.setFloat32(info_ptr + 0x30 + 0x10*k, pass.scroll_rate_x, true);
@@ -226,6 +226,9 @@ export class MaterialsChunk {
 					insert_bits(data, gif_ptr, 14, 6, pass.texture_buffer_width);
 					insert_bits(data, gif_ptr, 26, 4, pass.texture_log_width);
 					insert_bits(data, gif_ptr, 30, 4, pass.texture_log_height);
+					insert_bits(data, gif_ptr, 34, 1, 1);
+					insert_bits(data, gif_ptr, 51, 4, GsStorageFormat.PSMCT32);
+					if(material.texture_file >= 0) insert_bits(data, gif_ptr, 61, 3, 4)
 					insert_bits(data, gif_ptr, 37, 14, pass.clut_location);
 					gif_ptr += 16;
 

@@ -45,9 +45,9 @@ export class CollisionObject {
 				else if(rz < 0.1 && (oz-1) >= 0 && this.heightmap_grid[grid_width*(oz-1)+ox]) oz--;
 			}
 		}
-		if(ox<0 || oz<0 || ox>=grid_width || oz>=grid_height) return this.bounds[0].origin[1];
+		if(ox<0 || oz<0 || ox>=grid_width || oz>=grid_height) return this.bounds[0]?.origin[1] ?? 0;
 		let grid = this.heightmap_grid[grid_width*oz+ox];
-		if(!grid) return this.bounds[0].origin[1];
+		if(!grid) return this.bounds[0]?.origin[1] ?? 0;
 		let ix_float = (ox_float - ox) * this.outer_tile_size / this.inner_tile_size;
 		let iz_float = (oz_float - oz) * this.outer_tile_size / this.inner_tile_size;
 		let ix = Math.max(0, Math.min(this.inner_grid_size-2, Math.floor(ix_float)))

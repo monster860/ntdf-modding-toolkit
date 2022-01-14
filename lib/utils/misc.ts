@@ -57,6 +57,10 @@ export function cross_product(a : Vec3, b : Vec3) : Vec3 {
 	]
 }
 
+export function dot_product(a : Vec3, b : Vec3) : number {
+	return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+
 export type Matrix = [number,number,number,number,number,number,number,number,number,number,number,number,number,number,number,number];
 export type Vec3 = [number,number,number];
 export type Vec4 = [number,number,number,number];
@@ -70,11 +74,32 @@ export function triangle_normal(a : Vec3, b : Vec3, c : Vec3) {
 			c[0]-a[0], c[1]-a[1], c[2]-a[2]
 		]
 	);
-	let inv_magnitude = 1 / Math.sqrt(vec[0]*vec[0] + vec[1]*vec[1] + vec[2]*vec[2]);
-	vec[0] *= inv_magnitude;
-	vec[1] *= inv_magnitude;
-	vec[2] *= inv_magnitude;
-	return vec;
+	return normalize_vector(vec);
+}
+
+export function within_triangle_xz(tri : [Vec3,Vec3,Vec3], point:Vec3) : boolean {
+	for(let i = 0; i < 3; i++) {
+		let a = tri[i];
+		let b = tri[(i+1)%3];
+		let normal:Vec3 = [a[2]-b[2], 0, b[0]-a[0]];
+		if(dot_product(point, normal) > dot_product(a, normal)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+export function normalize_vector(vec : Vec3) : Vec3 {
+	let magnitude_inv = 1/Math.sqrt(vec[0]**2 + vec[1]**2 + vec[2]**2);
+	return [vec[0]*magnitude_inv, vec[1]*magnitude_inv, vec[2]*magnitude_inv];
+}
+
+export function triangle_height(tri : [Vec3,Vec3,Vec3], x:number, z:number) {
+	let normal = triangle_normal(...tri);
+	let plane_xfac = -normal[0] / normal[1];
+	let plane_zfac = -normal[2] / normal[1];
+	let plane_adj = tri[0][1] + (normal[0]*tri[0][0] + normal[2]*tri[0][2]) / normal[1];
+	return x*plane_xfac + z*plane_zfac + plane_adj;
 }
 
 export function matrix_multiply(a : Matrix, b : Matrix) {

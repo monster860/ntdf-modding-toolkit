@@ -1,10 +1,12 @@
 import assert from "assert";
-import { CollisionChunk } from "../chunks/collision.js";
+import { VerifyPublicKeyInput } from "crypto";
+import { union } from "martinez-polygon-clipping";
+import { CollisionBoundary, CollisionChunk, CollisionObject, FloorMaterial, FloorType } from "../chunks/collision.js";
 import { MaterialsChunk, ShaderType } from "../chunks/materials.js";
 import { ModelChunk, ModelNode, ModelNodeEmpty, ModelNodeLodGroup, ModelNodeMesh, ModelNodeType, ModelNodeZoneGroup } from "../chunks/model.js";
 import { GsColorParam } from "../ps2/gs_constants.js";
 import { VifCode, VifCodeType } from "../ps2/vifcode.js";
-import { apply_matrix, identity_matrix, insert_bits, linear_to_srgb, Matrix, matrix_multiply, srgb_to_linear, transform_to_matrix, Vec3, Vec4 } from "../utils/misc.js";
+import { apply_matrix, cross_product, distance_sq, distance_xz_sq, dot_product, identity_matrix, insert_bits, linear_to_srgb, Matrix, matrix_multiply, normalize_vector, srgb_to_linear, transform_to_matrix, triangle_height, triangle_normal, Vec3, Vec4, within_triangle_xz } from "../utils/misc.js";
 import { GlTf, MeshPrimitive, Node } from "./gltf.js";
 
 interface GltfImport {
@@ -27,6 +29,8 @@ class GlTfImporter {
 	all_nodes : Node[];
 
 	output : GltfImport;
+
+	has_ntdf_materials : boolean = false;
 
 	constructor(glb_buffer : ArrayBuffer, materials : MaterialsChunk) {
 		this.materials = materials;
@@ -64,7 +68,10 @@ class GlTfImporter {
 			type: ModelNodeType.Empty,
 			render_distance: 1e4
 		};
-		this.output = {model: new ModelChunk(this.root)};
+		this.output = {
+			model: new ModelChunk(this.root),
+			collision: new CollisionChunk([], 0)
+		};
 
 		assert(gltf.scenes, "This glTF file is missing a scene!");
 		let scene = gltf.scenes[gltf.scene ?? 0];
@@ -76,6 +83,12 @@ class GlTfImporter {
 		for(let nodeid of this.scene_nodes) {
 			let node = this.all_nodes[nodeid];
 			this.propogate_transform(node);
+		}
+
+		for(let material of gltf.materials ?? []) {
+			if(material.extras && ("ntdf_mat_index" in material.extras)) {
+				this.has_ntdf_materials = true;
+			}
 		}
 
 		for(let zone_holder of this.zone_holders) {
@@ -112,10 +125,18 @@ class GlTfImporter {
 				};
 				zone.children.push(lod_group);
 			}
-			zone.children.sort()
+			zone.children.sort((a,b) => ((b.render_distance??1e4)-(a?.render_distance??1e4)))
 		}
 
 		this.propogate_attributes(this.root);
+
+		if(this.output.collision) {
+			for(let [index, name] of this.splash_linkages) {
+				let target_index = this.collision_indices.get(name);
+				assert(target_index != undefined, "Cannot find object named \"" + name + "\"");
+				this.output.collision.objects[index].water_splash_object = target_index;
+			}
+		}
 	}
 
 	propogate_attributes(node : ModelNode, render_distance = 1e4) {
@@ -176,8 +197,8 @@ class GlTfImporter {
 		}
 
 		primitives.sort((a, b) => {
-			let a_material_index = this.get_ntdf_material_index(a);
-			let b_material_index = this.get_ntdf_material_index(b);
+			let a_material_index = this.get_ntdf_material_index(a) ?? 0;
+			let b_material_index = this.get_ntdf_material_index(b) ?? 0;
 			let tex_diff = this.materials.materials[a_material_index].texture_file - this.materials.materials[b_material_index].texture_file;
 			/* I'm not sure if this is entirely necessary, but this separates the
 			  texture files to possibly avoid having to swap them a lot, since I'm
@@ -209,6 +230,7 @@ class GlTfImporter {
 	encode_primitive(primitive : MeshPrimitive, transform : Matrix) : ModelNode[] {
 		if(primitive.mode && primitive.mode < 4) return []; // No lines and points. At least for now.
 		let ntdf_material_index = this.get_ntdf_material_index(primitive);
+		if(ntdf_material_index == undefined) return [];
 		let ntdf_material = this.materials.materials[ntdf_material_index];
 		let shader_type = ntdf_material.passes[0].shader_type;
 
@@ -474,7 +496,7 @@ class GlTfImporter {
 		assert(accessors);
 		let num_vertices = accessors[primitive.attributes.POSITION].count;
 		let datas : number[][] = [];
-		let material = this.materials.materials[this.get_ntdf_material_index(primitive)];
+		let material = this.materials.materials[this.get_ntdf_material_index(primitive)??0];
 		for(let [name, item] of Object.entries(primitive.attributes)) {
 			if(name == "TEXCOORD_1" && material.passes.length < 2) continue;
 			if(name.startsWith("TEXCOORD_") && material.texture_file < 0) continue;
@@ -638,6 +660,361 @@ class GlTfImporter {
 		}
 		return strips;
 	}
+
+	collision_indices = new Map<string, number>();
+	splash_linkages = new Map<number, string>();
+
+	add_node_collision(node : Node) {
+		if(!node.extras?.collision) return;
+		const epsilon = 0.001;
+		const epsilon_sq = epsilon**2;
+		let all_triangles = this.get_node_collision_triangles(node) as Array<[Vec3,Vec3,Vec3]|undefined>;
+
+		let use_included_walls = true;
+
+		let min_normal_y = epsilon;
+		if(node.extras?.max_slope != undefined) {
+			min_normal_y = Math.min(epsilon, Math.cos(Math.atan(+node.extras.max_slope || 0)));
+			use_included_walls = false;
+		}
+
+		let extend = 120;
+		if(node.extras?.extend) {
+			extend = Math.max(+node.extras?.extend || 0, 0.02);
+			use_included_walls = false;
+		}
+
+		let floor_triangles : [Vec3,Vec3,Vec3][] = [];
+		let walls : [Vec3,Vec3,number][] = [];
+
+		for(let i = 0; i < all_triangles.length; i++) {
+			let triangle = all_triangles[i];
+			if(!triangle) continue;
+			let normal = triangle_normal(...triangle);
+			if(normal[1] < -epsilon) continue;
+			else if(normal[1] > min_normal_y) {
+				floor_triangles.push(triangle);
+			} else if(normal[1] < epsilon && use_included_walls) {
+				// Wall handling!
+				let first_point : Vec3, second_point : Vec3, third_point : Vec3;
+				if(distance_xz_sq(triangle[0], triangle[1]) < epsilon_sq) [first_point, second_point, third_point] = triangle;
+				else if(distance_xz_sq(triangle[1], triangle[2]) < epsilon_sq) [third_point, first_point, second_point] = triangle;
+				else if(distance_xz_sq(triangle[0], triangle[2]) < epsilon_sq) [second_point, third_point, first_point] = triangle;
+				else continue;
+
+				let fourth_point : Vec3|undefined;
+				for(let j = i+1; j < all_triangles.length; j++) {
+					let triangle2 = all_triangles[j];
+					if(!triangle2) continue;
+					let normal2 = triangle_normal(...triangle2);
+					if((normal2[0]*normal[0] + normal2[1]*normal[1] + normal2[2]*normal[2]) <= 0) continue; // Skip if normal is other way.
+					let this_fourth_point : Vec3|undefined;
+					vert_loop: for(let vert_a = 0; vert_a < 3; vert_a++) for(let vert_b = 0; vert_b < 3; vert_b++) {
+						if(distance_sq(triangle[vert_a], triangle2[vert_b]) < epsilon_sq && distance_sq(triangle[(vert_a+1)%3], triangle2[(vert_b+1)%3])) {
+							this_fourth_point = triangle2[(vert_b+2)%3];
+							break vert_loop;
+						}
+						if(distance_sq(triangle2[vert_b], triangle[vert_a]) < epsilon_sq && distance_sq(triangle[(vert_a+1)%3], triangle2[(vert_b+1)%3])) {
+							this_fourth_point = triangle2[(vert_b+2)%3];
+							break vert_loop;
+						}
+					}
+					if(!this_fourth_point) continue;
+					if(distance_xz_sq(this_fourth_point, third_point) < epsilon_sq) {
+						all_triangles[j] = undefined;
+						fourth_point = this_fourth_point; break;
+					}
+				}
+				if(!fourth_point) continue;
+				let point_a:Vec3 = [first_point[0], Math.max(first_point[1], second_point[1]), first_point[2]];
+				let point_b:Vec3 = [third_point[0], Math.max(third_point[1], fourth_point[1]), third_point[2]];
+				walls.push(
+					[
+						first_point[1] > second_point[1] ? point_a : point_b,
+						first_point[1] > second_point[1] ? point_b : point_a,
+						Math.max(Math.abs(first_point[1]-second_point[1]), Math.abs(third_point[1]-fourth_point[1]))
+					]
+				);
+			}
+		}
+
+		if(!floor_triangles.length && !walls.length) return;
+
+		let aabb_start:[number,number] = [Infinity,Infinity];
+		let aabb_end:[number,number] = [-Infinity,-Infinity];
+		if(walls.length) {
+			for(let wall of walls) {
+				for(let point of [wall[0],wall[1]]) {
+					aabb_start[0] = Math.min(aabb_start[0], point[0]-0.1);
+					aabb_start[1] = Math.min(aabb_start[1], point[2]-0.1);
+					aabb_end[0] = Math.max(aabb_end[0], point[0]+0.1);
+					aabb_end[1] = Math.max(aabb_end[1], point[2]+0.1);
+				}
+			}
+		} else {
+			for(let triangle of floor_triangles) {
+				for(let point of triangle) {
+					aabb_start[0] = Math.min(aabb_start[0], point[0]-0.1);
+					aabb_start[1] = Math.min(aabb_start[1], point[2]-0.1);
+					aabb_end[0] = Math.max(aabb_end[0], point[0]+0.1);
+					aabb_end[1] = Math.max(aabb_end[1], point[2]+0.1);
+				}
+			}
+		}
+
+		let collision_object = new CollisionObject();
+		collision_object.inner_grid_size = 11;
+		collision_object.aabb_start = aabb_start;
+		collision_object.aabb_end = aabb_end;
+
+		if(node.extras?.collision_mask != undefined) {
+			collision_object.mask = node.extras.collision_mask|0;
+		}
+		if(node.extras?.zone_id != undefined) {
+			collision_object.zone = node.extras.zone_id|0;
+		}
+		if(node.extras?.floor_type != undefined) {
+			let type = node.extras?.floor_type;
+			if(typeof type != "number") {
+				type = FloorType[type];
+			}
+			if(typeof type != "number") {
+				throw new Error("Unexpected floor type " + node.extras?.floor_type + ". Valid values are: " + Object.keys(FloorType).filter(i => typeof FloorType[i as any] == "number").join(", "));
+			}
+			collision_object.floor_type = type;
+		}
+		if(node.extras?.floor_material != undefined) {
+			let type = node.extras?.floor_material;
+			if(typeof type != "number") {
+				type = FloorMaterial[type];
+			}
+			if(typeof type != "number") {
+				throw new Error("Unexpected floor type " + node.extras?.floor_material + ". Valid values are: " + Object.keys(FloorMaterial).filter(i => typeof FloorMaterial[i as any] == "number").join(", "));
+			}
+			collision_object.floor_material = type;
+		}
+		if(node.extras?.drown_target != undefined) {
+			collision_object.drown_target = node.extras.drown_target|0;
+		}
+
+		if(floor_triangles.length) {
+			let base_triangle = floor_triangles[Math.floor(floor_triangles.length/2)];
+
+			let normal = triangle_normal(...base_triangle);
+
+			// Hah the original exporter Idol Minds made isn't smart enough to do this
+			// Construct a plane and check if all the points in the floor lie on this plane. If so, we can use a super-low-res heightmap
+			let plane_xfac = -normal[0] / normal[1];
+			let plane_zfac = -normal[2] / normal[1];
+			let plane_adj = base_triangle[0][1] + (normal[0]*base_triangle[0][0] + normal[2]*base_triangle[0][2]) / normal[1];
+
+			let is_flat = true;
+			for(let triangle of floor_triangles) {
+				for(let vert of triangle) {
+					let plane_y = plane_xfac*vert[0] + plane_adj + plane_zfac*vert[2];
+					if(!(Math.abs(plane_y - vert[1]) < epsilon)) {
+						is_flat = false; break;
+					}
+				}
+				if(!is_flat) break;
+			}
+			if(is_flat) {
+				collision_object.outer_tile_size = Math.max(aabb_end[0]-aabb_start[0], aabb_end[1]-aabb_start[1]);
+				collision_object.inner_tile_size = collision_object.outer_tile_size;
+				collision_object.outer_grid_height = 1;
+				collision_object.outer_grid_width = 1;
+				collision_object.inner_grid_size = 2;
+				let heightmap : number[] = [];
+				for(let iz = 0; iz < 2; iz++) for(let ix = 0; ix < 2; ix++) {
+					heightmap[iz*2+ix] = plane_xfac*(aabb_start[0]+ix*collision_object.inner_tile_size) + plane_zfac*(aabb_start[1]+iz*collision_object.inner_tile_size) + plane_adj;
+				}
+				collision_object.heightmap_grid = [heightmap];
+			} else {
+				let heightmap_resolution = 1.5;
+				if(node.extras?.heightmap_resolution != undefined)
+					heightmap_resolution = Math.max(node.extras.heightmap_resolution, 0.1)
+				collision_object.inner_tile_size = heightmap_resolution;
+				collision_object.outer_tile_size = heightmap_resolution * (collision_object.inner_grid_size-1);
+				collision_object.outer_grid_width = Math.ceil((aabb_end[0]-aabb_start[0]) / collision_object.outer_tile_size);
+				collision_object.outer_grid_height = Math.ceil((aabb_end[1]-aabb_start[1]) / collision_object.outer_tile_size);
+				let grid_triangles : number[][] = [];
+				let grid = new Array<number[]|undefined>(collision_object.outer_grid_width*collision_object.outer_grid_height);
+				for(let i = 0; i < collision_object.outer_grid_height*collision_object.outer_grid_width; i++) grid_triangles.push([]);
+				for(let i = 0; i < floor_triangles.length; i++) {
+					let minx = Infinity;
+					let minz = Infinity;
+					let maxx = -Infinity;
+					let maxz = -Infinity;
+					let triangle = floor_triangles[i];
+					for(let j = 0; j < 3; j++) {
+						minx = Math.min(minx, triangle[j][0]-collision_object.outer_tile_size);
+						minz = Math.min(minz, triangle[j][2]-collision_object.outer_tile_size);
+						maxx = Math.max(maxx, triangle[j][0]+collision_object.outer_tile_size);
+						maxz = Math.max(maxz, triangle[j][2]+collision_object.outer_tile_size);
+					}
+					let int_minx = Math.floor((minx - collision_object.aabb_start[0]) / collision_object.outer_tile_size);
+					let int_minz = Math.floor((minz - collision_object.aabb_start[1]) / collision_object.outer_tile_size);
+					let int_maxx = Math.floor((maxx - collision_object.aabb_start[0]) / collision_object.outer_tile_size)+1;
+					let int_maxz = Math.floor((maxz - collision_object.aabb_start[1]) / collision_object.outer_tile_size)+1;
+					for(let z = int_minz; z < int_maxz; z++) for(let x = int_minx; x < int_maxx; x++) {
+						if(z<0 || x<0 || z>=collision_object.outer_grid_height || x>=collision_object.outer_grid_width) {
+							continue;
+						}
+						grid_triangles[z*collision_object.outer_grid_width+x].push(i);
+					}
+				}
+				for(let outer_z = 0; outer_z < collision_object.outer_grid_height; outer_z++) for(let outer_x = 0; outer_x < collision_object.outer_grid_width; outer_x++) {
+					let ox = outer_x*collision_object.outer_tile_size + collision_object.aabb_start[0];
+					let oz = outer_z*collision_object.outer_tile_size + collision_object.aabb_start[1];
+					let grid_i = outer_x + outer_z*collision_object.outer_grid_width;
+					if(!grid_triangles[grid_i].length) continue;
+					let heightmap : number[] = [];
+					for(let iz = 0; iz < collision_object.inner_grid_size; iz++) for(let ix = 0; ix < collision_object.inner_grid_size; ix++) {
+						let x = ox + ix*collision_object.inner_tile_size;
+						let z = oz + iz*collision_object.inner_tile_size;
+
+						let sel_triangle : [Vec3,Vec3,Vec3]|undefined = undefined;
+						for(let tri_index of grid_triangles[grid_i]) {
+							let triangle = floor_triangles[tri_index];
+							if(within_triangle_xz(triangle, [x,0,z])) {
+								sel_triangle = triangle; break;
+							}
+						}
+						if(!sel_triangle) {
+							sel_triangle = floor_triangles[grid_triangles[grid_i][0]];
+							let sel_distance = Infinity;
+							for(let tri_index of grid_triangles[grid_i]) {
+								let triangle = floor_triangles[tri_index];
+								for(let point of triangle) {
+									let dist = distance_xz_sq(point, [x,0,z]);
+									if(dist < sel_distance) {
+										sel_distance = dist;
+										sel_triangle = triangle;
+									}
+								}
+								if(within_triangle_xz(triangle, [x,0,z])) {
+									sel_triangle = triangle; break;
+								}
+							}
+						}
+						if(sel_triangle) {
+							heightmap.push(triangle_height(sel_triangle, x, z));
+						} else {
+							heightmap.push(0);
+						}
+					}
+					grid[grid_i] = heightmap;
+				}
+				collision_object.heightmap_grid = grid;
+			}
+		}
+
+		let shape : [number,number][][][] = [];
+		
+		if(!walls.length) {
+			for(let triangle of floor_triangles) {
+				let triangle_shape : [number,number][][] = [[
+					[triangle[0][0],-triangle[0][2]],
+					[triangle[1][0],-triangle[1][2]],
+					[triangle[2][0],-triangle[2][2]],
+					[triangle[0][0],-triangle[0][2]],
+				]];
+				if(shape.length) shape = union(shape, triangle_shape) as [number,number][][][];
+				else shape.push(triangle_shape);
+			}
+
+			for(let poly of shape) {
+				for(let subpoly of poly) {
+					for(let i = 0; i < subpoly.length-1; i++) {
+						walls.push([
+							[subpoly[i][0], collision_object.get_heightmap_y(subpoly[i][0], -subpoly[i][1]), -subpoly[i][1]],
+							[subpoly[i+1][0], collision_object.get_heightmap_y(subpoly[i+1][0], -subpoly[i+1][1]), -subpoly[i+1][1]],
+							extend
+						])
+					}
+				}
+			}
+		}
+
+		for(let wall of walls) {
+			let wall_normal : Vec3 = normalize_vector([wall[0][2]-wall[1][2], 0, wall[1][0]-wall[0][0]]);
+			let wall_tangent : Vec3 = normalize_vector([wall[1][0]-wall[0][0], wall[1][1]-wall[0][1], wall[1][2]-wall[0][2]]);
+			let wall_flat_tangent : Vec3 = normalize_vector([wall[1][0]-wall[0][0], 0, wall[1][2]-wall[0][2]]);
+			let wall_up = cross_product(wall_normal, wall_tangent);
+			wall_up[0] /= wall_up[1];
+			wall_up[2] /= wall_up[1];
+			wall_up[1] = 1;
+
+			let matrix_origin : Vec3 = [wall[0][0], wall[0][1]-wall[2], wall[0][2]];
+
+			let bound : CollisionBoundary = {
+				width: Math.sqrt(distance_xz_sq(wall[0], wall[1])),
+				origin: [...wall[0]],
+				z_size: wall[1][2] - wall[0][2],
+				height: wall[2],
+				matrix: [
+					...wall_normal, -dot_product(wall_normal, matrix_origin),
+					...wall_flat_tangent, -dot_product(wall_flat_tangent, matrix_origin),
+					...wall_up, -dot_product(wall_up, matrix_origin)
+				],
+				to_left: undefined,
+				to_right: undefined
+			}
+			collision_object.bounds.push(bound);
+		}
+
+		for(let i = 0; i < walls.length; i++) {
+			for(let j = 0; j < walls.length; j++) {
+				if(i != j && distance_sq(walls[i][1], walls[j][0]) < epsilon_sq) {
+					collision_object.bounds[i].to_right = j;
+					collision_object.bounds[j].to_left = i;
+				}
+			}
+		}
+		if(!this.output.collision) this.output.collision = new CollisionChunk([]);
+		if(node.name) this.collision_indices.set(node.name, this.output.collision.objects.length);
+		if(node.extras?.water_splash_object) {
+			this.splash_linkages.set(this.output.collision.objects.length, ""+node.extras?.water_splash_object);
+		}
+		this.output.collision.objects.push(collision_object);
+	}
+
+	get_node_collision_triangles(node : Node) : [Vec3,Vec3,Vec3][] {
+		if(node.mesh == undefined || this.gltf.meshes == undefined) return [];
+		let mesh = this.gltf.meshes[node.mesh];
+		assert(mesh);
+		let triangles : [Vec3,Vec3,Vec3][] = [];
+		for(let primitive of mesh.primitives) {
+			triangles.push(...this.get_primitive_collision_triangles(primitive, node));
+		}
+		return triangles;
+	}
+
+	get_primitive_collision_triangles(primitive : MeshPrimitive, node : Node) : [Vec3,Vec3,Vec3][] {
+		if(primitive.indices == undefined || (primitive.mode != undefined && primitive.mode != 4)) return [];
+		if(primitive.material != undefined) {
+			if(this.gltf.materials?.[primitive.material]?.extras?.no_collision) {
+				return [];
+			}
+		}
+		let transform = this.absolute_transforms.get(node);
+		assert(transform);
+		let triangles : [Vec3,Vec3,Vec3][] = [];
+		let positions = this.get_accessor(primitive.attributes.POSITION).data;
+		let indices = this.get_accessor(primitive.indices).data;
+		for(let i = 0; i < indices.length; i += 3) {
+			let i1 = indices[i];
+			let i2 = indices[i+1];
+			let i3 = indices[i+2];
+			let triangle = [
+				apply_matrix(transform, [positions[i1*3],positions[i1*3+1],positions[i1*3+2]]),
+				apply_matrix(transform, [positions[i2*3],positions[i2*3+1],positions[i2*3+2]]),
+				apply_matrix(transform, [positions[i3*3],positions[i3*3+1],positions[i3*3+2]])
+			] as [Vec3,Vec3,Vec3];
+			triangles.push(triangle);
+		}
+		return triangles;
+	}
 	
 	get_accessor(id : number) {
 		let accessors = this.gltf.accessors;
@@ -696,10 +1073,10 @@ class GlTfImporter {
 		}
 	}
 
-	get_ntdf_material_index(primitive : MeshPrimitive) : number {
+	get_ntdf_material_index(primitive : MeshPrimitive) : number|undefined {
 		let all_materials = this.gltf.materials;
-		if(!all_materials) return 0;
-		if(!primitive.material) return 0;
+		if(!all_materials) return this.has_ntdf_materials ? undefined : 0;
+		if(primitive.material == undefined) return this.has_ntdf_materials ? undefined : 0;
 		let material = all_materials[primitive.material];
 		assert(material, "Primitive references non-extistent material " + primitive.material);
 		let material_index:number = material.extras?.ntdf_mat_index;
@@ -707,7 +1084,7 @@ class GlTfImporter {
 			assert(this.materials.materials[material_index], "glTF file references non-existent material index " + material_index + " in material " + material.name);
 			return material_index;
 		}
-		return 0;
+		return this.has_ntdf_materials ? undefined : 0;
 	}
 
 	absolute_transforms = new Map<Node, Matrix>();
@@ -715,6 +1092,9 @@ class GlTfImporter {
 	propogate_transform(node : Node, transform : Matrix = identity_matrix, zone_holder = this.get_zone_holder(0), lod_group = zone_holder.main_lod_group) {
 		transform = matrix_multiply(transform, (node.matrix as Matrix|undefined) ?? transform_to_matrix(node.translation as Vec3|undefined, node.rotation as Vec4|undefined, node.scale as Vec3|undefined));
 		this.absolute_transforms.set(node, transform);
+
+		this.add_node_collision(node);
+
 		if(node.extras?.zone_id != undefined && node.extras?.zone_id != zone_holder.zone_id) {
 			let zone_id = node.extras.zone_id|0;
 			assert(zone_id >= 0 && zone_id < 256, "Zone id " + zone_id + " is out of range");
