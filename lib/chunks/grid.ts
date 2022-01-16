@@ -1,6 +1,8 @@
 import assert from "assert";
 import Blob from "cross-blob"
+import { intersection } from "martinez-polygon-clipping";
 import { ChunkFile, ChunkType } from "../gamefile/chunk_file.js";
+import { apply_matrix, matrix_inverse, matrix_transpose } from "../utils/misc.js";
 import { CollisionChunk } from "./collision.js";
 
 export interface GridItem {
@@ -220,10 +222,32 @@ export class GridChunk {
 
 			for(let [index, object] of collision.objects.entries()) {
 				for(let [x,z] of this.get_tiles_in_rect(object.aabb_start[0]-1.075, object.aabb_start[1]-1.075, object.aabb_end[0]+1.075, object.aabb_end[1]+1.075)) {
+					let tile_shape = [[[
+						[this.x+x*this.scale, -this.z-z*this.scale],
+						[this.x+x*this.scale, -this.z-(z+1)*this.scale],
+						[this.x+(x+1)*this.scale, -this.z-(z+1)*this.scale],
+						[this.x+(x+1)*this.scale, -this.z-z*this.scale],
+						[this.x+x*this.scale, -this.z-z*this.scale],
+					]]];
+					let boundary_indices : number[] = [];
+					for(let [bound_index, bound] of object.bounds.entries()) {
+						let inv_mat = matrix_inverse(matrix_transpose([...bound.matrix, 0, 0, 0, 1]));
+						assert(inv_mat, "Collision boundary has a degenerate matrix");
+						let dl = apply_matrix(inv_mat, [0, -1.175, 0]);
+						let dr = apply_matrix(inv_mat, [0, bound.width+1.175, 0]);
+						let bound_shape = [[[
+							[dl[0]-bound.matrix[0]*0.3,-dl[2]+bound.matrix[2]*0.3],
+							[dr[0]+bound.matrix[0]*1.175,-dr[2]-bound.matrix[2]*1.175],
+							[dr[0]+bound.matrix[0]*1.175,-dr[2]-bound.matrix[2]*1.175],
+							[dr[0]-bound.matrix[0]*0.3,-dr[2]+bound.matrix[2]*0.3],
+							[dl[0]-bound.matrix[0]*0.3,-dl[2]+bound.matrix[2]*0.3]
+						]]];
+						if(intersection(bound_shape, tile_shape)?.length) boundary_indices.push(bound_index);
+					}
 					this.get_or_create_tile(x,z).collision_refs.push({
 						chunk_id: collision.id,
 						id: index,
-						boundary_indices: [...object.bounds.keys()]
+						boundary_indices: boundary_indices
 					});
 				}
 			}

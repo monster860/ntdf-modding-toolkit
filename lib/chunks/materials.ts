@@ -26,7 +26,7 @@ export class MaterialPass {
 
 	alpha_test_on = true;
 	alpha_test_method = GsAlphaTestMethod.GEQUAL;
-	alpha_test_ref = 120;
+	alpha_test_ref = 120/128;
 	alpha_fail_method = GsAlphaFailMethod.FB_ONLY;
 
 	dest_alpha_test_on = false;
@@ -211,8 +211,9 @@ export class MaterialsChunk {
 						continue;
 					}
 					let pass = material.passes[k];
+					dv.setInt16(info_ptr + 0x10 + 0x10*k, k + material.passes.length, true);
 					dv.setInt16(info_ptr + 0x14 + 0x10*k, pass.shader_type, true);
-					dv.setInt16(info_ptr + 0x18 + 0x10*k, (pass.scroll_rate_x || pass.scroll_rate_y) ? 0x23 : 0x27, true);
+					dv.setInt16(info_ptr + 0x18 + 0x10*k, 0x23, true);
 					dv.setInt16(info_ptr + 0x1C + 0x10*k, pass.metallic ? 1 : 2, true);
 
 					dv.setFloat32(info_ptr + 0x30 + 0x10*k, pass.scroll_rate_x, true);
@@ -222,8 +223,8 @@ export class MaterialsChunk {
 					// and context 1 for the second pass, so that's why its backwards
 					data[gif_ptr+8] = k ? GsRegister.TEX0_1 : GsRegister.TEX0_2;
 					insert_bits(data, gif_ptr, 0, 14, pass.texture_location[0] ?? 0);
-					insert_bits(data, gif_ptr, 20, 6, pass.texture_format);
 					insert_bits(data, gif_ptr, 14, 6, pass.texture_buffer_width);
+					insert_bits(data, gif_ptr, 20, 6, pass.texture_format);
 					insert_bits(data, gif_ptr, 26, 4, pass.texture_log_width);
 					insert_bits(data, gif_ptr, 30, 4, pass.texture_log_height);
 					insert_bits(data, gif_ptr, 34, 1, 1);

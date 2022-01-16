@@ -68,7 +68,7 @@ class GlTfExporter {
 					png_index = this.pngs.length;
 					pngs_included.set(png_name, png_index);
 					let clut_location = images[material.texture_file].find_location(pass.clut_location);
-					assert(clut_location);
+					if(!clut_location) clut_location = {format: GsStorageFormat.PSMCT32, width:16,height:16,is_clut:true,location:pass.clut_location};
 					let data = images[material.texture_file].export_indexed_data({
 						format: pass.texture_format,
 						width: 2**pass.texture_log_width,

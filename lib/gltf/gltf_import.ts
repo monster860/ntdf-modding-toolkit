@@ -1090,7 +1090,7 @@ class GlTfImporter {
 	absolute_transforms = new Map<Node, Matrix>();
 
 	propogate_transform(node : Node, transform : Matrix = identity_matrix, zone_holder = this.get_zone_holder(0), lod_group = zone_holder.main_lod_group) {
-		transform = matrix_multiply(transform, (node.matrix as Matrix|undefined) ?? transform_to_matrix(node.translation as Vec3|undefined, node.rotation as Vec4|undefined, node.scale as Vec3|undefined));
+		transform = matrix_multiply((node.matrix as Matrix|undefined) ?? transform_to_matrix(node.translation as Vec3|undefined, node.rotation as Vec4|undefined, node.scale as Vec3|undefined), transform);
 		this.absolute_transforms.set(node, transform);
 
 		this.add_node_collision(node);
