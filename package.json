@@ -2,12 +2,13 @@
   "name": "ntdf-modding-toolkit",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "build/index.js",
+  "types": "build/index.d.ts",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsc"
   },
-  "author": "monster860",
+  "author": "Maxim Nikitin",
   "license": "MIT",
   "devDependencies": {
     "@types/earcut": "^2.1.1",

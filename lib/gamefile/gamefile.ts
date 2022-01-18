@@ -1,6 +1,6 @@
 import Blob from "cross-blob";
 import { ChunkFile } from "./chunk_file.js";
-import { guess_sector_map, SectorMap } from "./sector_map.js";
+import { export_sector_map, guess_sector_map, import_sector_map, SectorMap } from "./sector_map.js";
 
 /**
  * A class for reading and modifying the GAMEFILE.DAT file on the game disc,
@@ -98,8 +98,37 @@ export class Gamefile {
 		this.#commit_changes();
 		return this.#blob;
 	}
+
+	static async from_iso(iso_blob : Blob) {
+		let exe_blob = iso_blob.slice(ISO_EXE_LOC, ISO_EXE_LOC+ISO_EXE_SIZE);
+		let sector_map = await import_sector_map(exe_blob);
+		let gamefile_size = 0;
+		for(let i = 0; i < sector_map.sectors.length; i++) {
+			gamefile_size = Math.max(gamefile_size, sector_map.sectors[i] = sector_map.sizes[i]);
+		}
+		gamefile_size *= 2048;
+		let gamefile_blob = iso_blob.slice(ISO_GAMEFILE_LOC, ISO_GAMEFILE_LOC+gamefile_size);
+		return new Gamefile(gamefile_blob, sector_map);
+	}
+	async patch_iso(iso_blob : Blob) : Promise<Blob> {
+		let exe_blob = iso_blob.slice(ISO_EXE_LOC, ISO_EXE_LOC+ISO_EXE_SIZE);
+		let modified_exe = await export_sector_map(exe_blob, this.sector_map);
+
+		return new Blob([
+			iso_blob.slice(0, ISO_EXE_LOC),
+			modified_exe,
+			iso_blob.slice(ISO_EXE_LOC + modified_exe.size, ISO_GAMEFILE_LOC),
+			this.blob,
+			iso_blob.slice(Math.min(iso_blob.size, ISO_GAMEFILE_LOC + this.blob.size))
+		]);
+	}
+
+	static TRANSITION_SIZE_LIMIT = 0x44B000;
+	static EXTERIOR_SIZE_LIMIT = 0x9B5000;
 }
 
-// Some quick stuff - Size limit for transitions is 0x44B000 or 4,501,504, and size limit for exteriors is 0x9b5000 or 10,178,560
+const ISO_EXE_LOC = 390*2048;
+const ISO_EXE_SIZE = 2291560;
+const ISO_GAMEFILE_LOC = 885373*2048;
 
 const zero_blob = new Blob([new ArrayBuffer(2048)]);
