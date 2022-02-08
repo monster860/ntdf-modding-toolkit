@@ -10,9 +10,12 @@ export enum ChunkType {
 	ModelList = 8,
 	DynamicModel = 12,
 	Model = 13,
+	Skeleton = 18,
+	CharacterAssets = 18, // Not a typo, these really do have the same type ID.
 	WorldGrid = 19,
 	DynamicObjects = 29,
 	Header = 31,
+	AssetGroup = 32,
 	ShadowModel = 33,
 	ZoneVis = 35,
 	LevelDLL = 37,
@@ -38,14 +41,16 @@ export class ChunkFile {
 				}
 				throw e;
 			}
-			if(chunk.type == 0) break;
-			chunks.push(chunk);
 			chunk.offset += offset;
 			offset += chunk.contents.size + chunk.padding_bytes + 16;
+			if(chunk.type == 0) break;
+			chunks.push(chunk);
 			blob = blob.slice(chunk.contents.size + chunk.padding_bytes + 16);
 
 		}
-		return new ChunkFile(chunks);
+		let out = new ChunkFile(chunks);
+		out.original_size = offset;
+		return out;
 	}
 
 	get_chunk_of_type(type : number, index = 0) : Chunk {
@@ -66,16 +71,25 @@ export class ChunkFile {
 		return chunks;
 	}
 
-	get_chunk_by_id(type : number, id : number) : Chunk {
+	get_chunk_by_id(type : number, id : number, index = 0) : Chunk {
 		for(let chunk of this.chunks) {
-			if(chunk.type == type && chunk.id == id) return chunk;
+			if(chunk.type == type && chunk.id == id) {
+				if(index > 0)
+					index--;
+				else
+					return chunk;
+			}
 		}
-		throw new Error("Chunk of type " + type + " not found with id " + id);
+		throw new Error("Chunk of type " + type + " not found with id " + id + " and index " + index);
 	}
 
 	delete_chunk(chunk : Chunk) {
 		let index = this.chunks.indexOf(chunk);
 		if(index >= 0) this.chunks.splice(index, 1);
+	}
+
+	copy() {
+		return new ChunkFile([...this.chunks]);
 	}
 
 	to_blob() : Blob {
@@ -115,6 +129,8 @@ export class ChunkFile {
 		await grid.rebuild(this);
 		grid_chunk.contents = grid.to_blob();
 	}
+
+	original_size : number|undefined;
 }
 
 export class Chunk {
@@ -162,5 +178,11 @@ export class Chunk {
 		header_dv.setInt16(14, this.id, true);
 
 		return new Blob([header, this.contents]);
+	}
+
+	copy() {
+		let copy = new Chunk(this.contents, this.type, this.id, this.padding_bytes);
+		copy.offset = this.offset;
+		return copy;
 	}
 }

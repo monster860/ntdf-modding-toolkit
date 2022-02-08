@@ -19,7 +19,7 @@ type TableRowOf<T extends readonly TableFieldType[]> = {
 	-readonly [P in keyof T]: T[P] extends TableFieldType ? TableField<T[P]> : never
 }
 
-export class TableChunk<T extends readonly TableFieldType[]> {
+export class TableChunk<T extends readonly TableFieldType[] = TableFieldType[]> {
 	constructor(public readonly format : T, public entries : TableRowOf<T>[]) {
 	}
 
@@ -232,5 +232,13 @@ export namespace TableFormats {
 		TableFieldType.String,
 		TableFieldType.String,
 		TableFieldType.Uint32
+	] as const;
+
+	export const world_info = [
+		TableFieldType.Int32,
+		TableFieldType.Int32,
+		TableFieldType.Int32,
+		TableFieldType.Int32,
+		TableFieldType.Int32,
 	] as const;
 }

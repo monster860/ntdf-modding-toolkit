@@ -1,7 +1,7 @@
 import { GsAlphaFailMethod, GsAlphaParam, GsAlphaTestMethod, GsColorParam, GsDepthTestMethod, GsFilter, GsRegister, GsStorageFormat, GsWrapMode } from "../ps2/gs_constants.js";
 import Blob from "cross-blob";
 import { extract_bits, insert_bits } from "../utils/misc.js";
-import { assert } from "console";
+import assert from "assert";
 
 export class MaterialPass {
 	shader_type : ShaderType = ShaderType.Unlit;
@@ -122,12 +122,12 @@ export class MaterialsChunk {
 					case GsRegister.MIPTBP1_1:
 						pass = material.passes[1];
 					case GsRegister.MIPTBP1_2:
-						if(pass.texture_location.length >= 1)
-							pass.texture_location[1] = extract_bits(data, register_ptr, 14, 0);
 						if(pass.texture_location.length >= 2)
-							pass.texture_location[2] = extract_bits(data, register_ptr, 14, 20);
+							pass.texture_location[1] = extract_bits(data, register_ptr, 0, 14);
 						if(pass.texture_location.length >= 3)
-							pass.texture_location[3] = extract_bits(data, register_ptr, 14, 40);
+							pass.texture_location[2] = extract_bits(data, register_ptr, 20, 14);
+						if(pass.texture_location.length >= 4)
+							pass.texture_location[3] = extract_bits(data, register_ptr, 40, 14);
 						break;
 					case GsRegister.CLAMP_1:
 						pass = material.passes[1];

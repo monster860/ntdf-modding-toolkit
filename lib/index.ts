@@ -13,4 +13,9 @@ export * from "./chunks/table.js"
 export * from "./gltf/gltf_export.js"
 export * from "./gltf/gltf_import.js"
 
+export * from "./utils/rgba_quant.js"
+export * from "./utils/text.js"
+
+export * from "./ps2/gs_constants.js"
+export * from "./ps2/swizzle.js"
 export * from "./ps2/vifcode.js"

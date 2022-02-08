@@ -10,6 +10,7 @@ export class Gamefile {
 	#sector_map : SectorMap;
 	#blob : Blob;
 	#file_replacements : Map<number, Blob> = new Map();
+	#file_cache : Map<number, Blob> = new Map();
 	/**
 	 * 
 	 * @param blob 
@@ -17,11 +18,23 @@ export class Gamefile {
 	 */
 	constructor(blob : Blob, sector_map? : SectorMap) {
 		if(!sector_map) sector_map = guess_sector_map(blob.size);
-		this.#sector_map = {sectors: [...sector_map.sectors], sizes: [...sector_map.sizes]};
-		Object.freeze(this.#sector_map);
-		Object.freeze(this.#sector_map.sectors);
-		Object.freeze(this.#sector_map.sizes);
+		if(Object.isFrozen(sector_map) && Object.isFrozen(sector_map.sectors) && Object.isFrozen(sector_map.sizes)) {
+			this.#sector_map = sector_map;
+		} else {
+			this.#sector_map = {sectors: [...sector_map.sectors], sizes: [...sector_map.sizes]};
+			Object.freeze(this.#sector_map);
+			Object.freeze(this.#sector_map.sectors);
+			Object.freeze(this.#sector_map.sizes);
+		}
 		this.#blob = blob;
+	}
+
+	copy() : Gamefile {
+		let copy = new Gamefile(this.#blob, this.#sector_map);
+		copy.#sector_map = this.#sector_map;
+		copy.#file_replacements = new Map(this.#file_replacements);
+		copy.#file_cache = new Map(this.#file_cache);
+		return copy;
 	}
 
 	get num_files() {return this.#sector_map.sectors.length;}
@@ -30,22 +43,28 @@ export class Gamefile {
 		if(index < 0 || index >= this.#sector_map.sectors.length) throw new Error("Could not get file - invalid index " + index);
 		let replacement = this.#file_replacements.get(index);
 		if(replacement) return replacement;
+		let cached = this.#file_cache.get(index);
+		if(cached) return cached;
 		let sector = this.#sector_map.sectors[index];
 		let size = this.#sector_map.sizes[index];
-		return this.#blob.slice(sector * 2048, (sector+size) * 2048);
+		let file = this.#blob.slice(sector * 2048, (sector+size) * 2048);
+		this.#file_cache.set(index, file);
+		return file;
 	}
 
-	replace_file(index : number, blob : Blob|undefined) : void {
+	replace_file(index : number, blob : Blob|undefined) : this {
 		if(index < 0 || index >= this.#sector_map.sectors.length) throw new Error("Could not replace file - invalid index " + index);
 		if(!blob) blob = new Blob();
 		this.#file_replacements.set(index, blob);
+		return this;
 	}
 
 	get_chunk_file(index : number) : Promise<ChunkFile> {
 		return ChunkFile.from_blob(this.get_file(index));
 	}
-	replace_chunk_file(index : number, file : ChunkFile) : void{
+	replace_chunk_file(index : number, file : ChunkFile) : this {
 		this.replace_file(index, file.to_blob());
+		return this;
 	}
 
 	#commit_changes() {
@@ -57,6 +76,7 @@ export class Gamefile {
 		for(let i = 0; i < this.num_files; i++) {
 			let replacement = this.#file_replacements.get(i);
 			if(replacement) {
+				this.#file_cache.set(i, replacement);
 				if(replacement.size) parts.push(replacement);
 				sectors.push(Math.ceil(ptr / 2048));
 				ptr += replacement.size;
@@ -104,7 +124,7 @@ export class Gamefile {
 		let sector_map = await import_sector_map(exe_blob);
 		let gamefile_size = 0;
 		for(let i = 0; i < sector_map.sectors.length; i++) {
-			gamefile_size = Math.max(gamefile_size, sector_map.sectors[i] = sector_map.sizes[i]);
+			gamefile_size = Math.max(gamefile_size, sector_map.sectors[i] + sector_map.sizes[i]);
 		}
 		gamefile_size *= 2048;
 		let gamefile_blob = iso_blob.slice(ISO_GAMEFILE_LOC, ISO_GAMEFILE_LOC+gamefile_size);
@@ -121,6 +141,12 @@ export class Gamefile {
 			this.blob,
 			iso_blob.slice(Math.min(iso_blob.size, ISO_GAMEFILE_LOC + this.blob.size))
 		]);
+	}
+
+	*[Symbol.iterator]() : IterableIterator<Blob> {
+		for(let i = 0; i < this.num_files; i++) {
+			yield this.get_file(i);
+		}
 	}
 
 	static TRANSITION_SIZE_LIMIT = 0x44B000;

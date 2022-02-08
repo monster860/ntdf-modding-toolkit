@@ -1,8 +1,9 @@
 import assert from "assert";
 import { GsStorageFormat } from "../ps2/gs_constants.js";
-import { deswizzle_32, swizzle_4, swizzle_8, swizzle_clut_buffer } from "../ps2/swizzle.js";
+import { deswizzle_32, swizzle_32, swizzle_4, swizzle_8, swizzle_clut_buffer } from "../ps2/swizzle.js";
 import { insert_bits } from "../utils/misc.js";
 import Blob from "cross-blob";
+import { quantize_image } from "../utils/rgba_quant.js";
 
 export interface ImageLocation {
 	width : number,
@@ -37,13 +38,15 @@ export class ImageChunk {
 	 */
 	export_data(where : ImageLocation, swap_red_blue = false, fixup_alpha = false) : Uint8Array {
 		if(where.format == GsStorageFormat.PSMCT32) {
-			let [base_x, base_y] = deswizzle_32(where.location << 6, this.width / 64);
+			let width = this.width/64;
 			let ptr = 0;
 			let output = new Uint8Array(4 * where.width * where.height);
 			let data_32 = new Uint32Array(this.data.buffer);
 			let output_32 = new Uint32Array(output.buffer);
 			for(let y = 0; y < where.height; y++) for(let x = 0; x < where.width; x++) {
-				let data_word_address = (x+base_x) + (y+base_y) * this.width;
+				let word_address = swizzle_32(x, y, width) + (64 * where.location);
+				let [wx, wy] = deswizzle_32(word_address, width);
+				let data_word_address = (wy * this.width + wx);
 				output_32[ptr++] = data_32[data_word_address];
 			}
 			if(swap_red_blue) {
@@ -104,7 +107,7 @@ export class ImageChunk {
 	 */
 	import_data(where : ImageLocation, input : Uint8Array, swap_red_blue = false, fixup_alpha = false) {
 		if(where.format == GsStorageFormat.PSMCT32) {
-			let [base_x, base_y] = deswizzle_32(where.location << 6, this.width / 64);
+			let width = this.width/64;
 			if(where.is_clut) input = swizzle_clut_buffer(input, where.width*where.height*4);
 			else if(swap_red_blue || fixup_alpha) input = input.slice();
 
@@ -125,7 +128,9 @@ export class ImageChunk {
 			let data_32 = new Uint32Array(this.data.buffer);
 			let input_32 = new Uint32Array(input.buffer);
 			for(let y = 0; y < where.height; y++) for(let x = 0; x < where.width; x++) {
-				let data_word_address = (x+base_x) + (y+base_y) * this.width;
+				let word_address = swizzle_32(x, y, width) + (64 * where.location);
+				let [wx, wy] = deswizzle_32(word_address, width);
+				let data_word_address = (wy * this.width + wx);
 				data_32[data_word_address] = input_32[ptr++];
 			}
 		} else if(where.format == GsStorageFormat.PSMT8) {
@@ -171,6 +176,16 @@ export class ImageChunk {
 			out_data[i] = clut_data[indexed[i]];
 		}
 		return new Uint8Array(out_data.buffer);
+	}
+
+	import_indexed_data(where : ImageLocation, input : Uint8Array, clut : ImageLocation, swap_red_blue? : boolean, fixup_alpha? : boolean, premultiply? : boolean) : void {
+		if(where.format == GsStorageFormat.PSMCT32) {
+			this.import_data(where, input, swap_red_blue, fixup_alpha);
+			return;
+		}
+		let clut_data = this.export_data(clut, swap_red_blue, fixup_alpha);
+		let out_data = quantize_image(input, clut_data, premultiply);
+		this.import_data(where, out_data);
 	}
 
 	static async from_blob(blob : Blob) : Promise<ImageChunk> {
@@ -254,13 +269,13 @@ export class ImageChunk {
 			if(location.format == GsStorageFormat.PSMT4 || location.format == GsStorageFormat.PSMT8) buffer_width *= 2;
 			else if(location.format == GsStorageFormat.PSMCT32 && location.is_clut) buffer_width /= 2;
 
-			dv.setUint16(location_ptr, location.location, true);
+			dv.setUint16(location_ptr, location.location + this.base, true);
 			data[location_ptr+2] = buffer_width;
 			dv.setUint32(location_ptr+4, (location.width & 0xFFF) | ((location.height & 0xFFF) << 12), true);
 			data[location_ptr+7] = location.format;
 
 			let reg_ptr = location_ptr+8;
-			insert_bits(data, reg_ptr, 0, 14, location.location);
+			insert_bits(data, reg_ptr, 0, 14, location.location + this.base);
 			insert_bits(data, reg_ptr, 14, 6, buffer_width);
 			insert_bits(data, reg_ptr, 20, 6, location.format);
 			insert_bits(data, reg_ptr, 26, 4, Math.ceil(Math.log2(location.width)));

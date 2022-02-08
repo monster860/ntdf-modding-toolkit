@@ -11,7 +11,15 @@ for(let i = 0; i < 256; i++) {
 
 const macro_names = new Map<string,number>([
 	["color", 2],
-	["next", 4]
+	["next", 4],
+	["set_flags", 17],
+	["clear_flags", 18],
+	["give", 19],
+	["set_dialog_camera", 21],
+	["set_game_stage", 25],
+	["hero_speaker", 32],
+	["placeholder", 33],
+	["reset_speaker", 34],
 ]);
 const macro_names_reverse = new Map<number, string>([...macro_names].map(a => [a[1],a[0]]));
 
@@ -92,7 +100,9 @@ export function encode_text(text : string) : Uint8Array {
 				encoded_array[length_measure_mark] = encoded_array.length - length_measure_mark + 2;
 			}
 		} else {
-			encoded_array.push(encode_mapping.get(text.charCodeAt(i)) ?? 255);
+			let encoded_char = encode_mapping.get(text.charCodeAt(i));
+			if(!encoded_char) throw new Error("Bad character!");
+			encoded_array.push(encoded_char);
 		}
 	}
 	return new Uint8Array(encoded_array);
