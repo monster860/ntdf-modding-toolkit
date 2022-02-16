@@ -1,4 +1,4 @@
-import { read_vif_code, VifCode, write_vif_code } from "../ps2/vifcode.js";
+import { read_vif_code, VifCode, VifCodeType, write_vif_code } from "../ps2/vifcode.js";
 import assert from "assert";
 import Blob from 'cross-blob';
 
@@ -7,6 +7,18 @@ export enum ModelNodeType {
 	Mesh = 1,
 	ZoneGroup = 3,
 	LodGroup = 4,
+}
+export interface BufferList {
+	vertices? : ArrayBuffer;
+	normals? : ArrayBuffer;
+	colors? : ArrayBuffer;
+	kick_flags? : ArrayBuffer;
+	uv? : ArrayBuffer;
+	uv2? : ArrayBuffer;
+	joints? : ArrayBuffer;
+	weights? : ArrayBuffer;
+	num_vertices : number;
+	vertex_start : number;
 }
 
 interface ModelNodeBase {
@@ -41,6 +53,7 @@ export interface ModelNodeLodGroup extends ModelNodeBase {
 	fade_rate: number;
 	render_distance : number;
 	display_mask : number;
+	sort_order : number;
 }
 
 export interface ModelNodeZoneGroup extends ModelNodeBase {
@@ -55,7 +68,15 @@ export interface ModelNodeEmpty extends ModelNodeBase {
 export type ModelNode = ModelNodeMesh|ModelNodeLodGroup|ModelNodeEmpty|ModelNodeZoneGroup;
 
 export class ModelChunk {
-	constructor(public root : ModelNode) {
+	constructor(public root : ModelNode = {
+		type: ModelNodeType.Empty,
+		bounds_origin: [0,0,0],
+		bounds_size: [0,0,0],
+		center: [0,0,0],
+		children: [],
+		id: 0,
+		radius: 0
+	}) {
 	}
 
 	to_blob() : Blob {
@@ -69,6 +90,48 @@ export class ModelChunk {
 		this.write_node(new DataView(buf), this.root, allocations);
 
 		return new Blob([buf]);
+	}
+
+	static get_mesh_buffers(node : ModelNodeMesh) {
+		let buffer_list : BufferList = {num_vertices: new Uint8Array(node.initial_state)[0], vertex_start : 0};
+		let buffer_lists : BufferList[] = [];
+		let start_addr = (node.initial_state.byteLength / 16)|0;
+		for(let item of node.vif_code) {
+			if(item.type == VifCodeType.UNPACK) {
+				if(item.vn == 3 && item.vl == 0 && item.location == 0) {
+					buffer_list.num_vertices = new Uint8Array(item.data)[0];
+					continue;
+				}
+				let which = (item.location - start_addr) / buffer_list.num_vertices;
+				let size = item.num / buffer_list.num_vertices
+				if(which == 0 && item.vn == 2 && item.vl == 0) {
+					buffer_list.vertices = item.data;
+				} else if(which == 0 && item.vn == 0 && item.vl == 2) {
+					buffer_list.kick_flags = item.data;
+				} else if(which == 1 && item.vn == 3 && item.vl == 2) {
+					buffer_list.colors = item.data;
+				} else if(which == 2 && item.vn == 2 && item.vl == 0) {
+					buffer_list.normals = item.data;
+				} else if(item.vn == 1 && item.vl == 0) {
+					if(size == 2) {
+						buffer_list.uv = item.data.slice(0, 8*buffer_list.num_vertices);
+						buffer_list.uv2 = item.data.slice(8*buffer_list.num_vertices, 16*buffer_list.num_vertices);
+					} else {
+						buffer_list.uv = item.data;
+					}
+				} else if(which == 3 && item.vn == 2 && item.vl == 0) {
+					buffer_list.weights = item.data;
+				} else if(which == 4 && item.vn == 3 && item.vl == 2) {
+					buffer_list.joints = item.data;
+				}
+			} else if(item.type == VifCodeType.MSCNT) {
+				buffer_lists.push({...buffer_list});
+				buffer_list.vertex_start += buffer_list.num_vertices;
+			}
+		}
+		buffer_lists.push({...buffer_list});
+		buffer_list.vertex_start += buffer_list.num_vertices;
+		return [buffer_lists, buffer_list.vertex_start] as const;
 	}
 
 	private allocate_node(node : ModelNode, allocations : ModelAllocations) {
@@ -153,6 +216,7 @@ export class ModelChunk {
 			dv.setFloat32(ptr + 0x58, node.fade_rate, true);
 			dv.setUint32(ptr + 0x5C, node.display_mask, true);
 			dv.setFloat32(ptr + 0x64, node.render_distance, true);
+			dv.setInt8(ptr + 0x62, node.sort_order);
 		} else if(node.type == ModelNodeType.Mesh) {
 			let arr = new Uint8Array(dv.buffer);
 			arr.set(new Uint8Array(node.initial_state), ptr+0x90);
@@ -210,11 +274,13 @@ export class ModelChunk {
 			let c3 = c3_ptr ? ModelChunk.read_node(dv, c3_ptr) : null;
 			let fade_rate = dv.getFloat32(ptr + 0x58, true);
 			let display_mask = dv.getUint32(ptr + 0x5C, true);
+			let sort_order = dv.getInt8(ptr + 0x62)
 			return {
 				type, id, children,
 				bounds_origin, bounds_size, center,
 				radius, render_distance,
 				fade_rate,
+				sort_order,
 				c1, c2, c3,
 				display_mask,
 				addr: ptr

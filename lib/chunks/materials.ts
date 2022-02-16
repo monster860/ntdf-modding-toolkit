@@ -42,6 +42,12 @@ export class MaterialPass {
 	alpha_blend_value = 0;
 
 	metallic = false;
+
+	animated = false;
+	animate_num_frames = 0;
+	animate_num_frames_x = 0;
+	animate_num_frames_y = 0;
+	animate_frame_delay = 0;
 }
 
 export class Material {
@@ -53,7 +59,8 @@ export enum ShaderType {
 	Unlit = 0,
 	Lit = 1,
 	LitRigged = 2,
-	WaterSheen = 4
+	UnlitNormals = 4,
+	SpecularRigged = 6,
 }
 
 export class MaterialsChunk {
@@ -79,9 +86,17 @@ export class MaterialsChunk {
 				if(pass_shader >= 0) {
 					let pass = new MaterialPass();
 					pass.shader_type = pass_shader;
-					pass.scroll_rate_x = dv.getFloat32(material_ptr + 0x60 + 0x10*j, true);
-					pass.scroll_rate_y = dv.getFloat32(material_ptr + 0x64 + 0x10*j, true);
-					pass.metallic = dv.getInt16(material_ptr + 0x4c + 0x10*j, true) == 1;
+					let effect = dv.getInt16(material_ptr + 0x4c + 0x10*j, true);
+					if(effect == 2) {
+						pass.scroll_rate_x = dv.getFloat32(material_ptr + 0x60 + 0x10*j, true);
+						pass.scroll_rate_y = dv.getFloat32(material_ptr + 0x64 + 0x10*j, true);
+					}
+					pass.metallic = effect == 1;
+					pass.animated = effect == 3;
+					pass.animate_num_frames = dv.getFloat32(material_ptr + 0x0 + 0x10*j, true);
+					pass.animate_num_frames_x = dv.getFloat32(material_ptr + 0x4 + 0x10*j, true);
+					pass.animate_num_frames_y = dv.getFloat32(material_ptr + 0x8 + 0x10*j, true);
+					pass.animate_frame_delay = dv.getFloat32(material_ptr + 0xC + 0x10*j, true);
 					material.passes.push(pass);
 				} else {
 					break;
@@ -135,10 +150,10 @@ export class MaterialsChunk {
 						pass.wrap_h = extract_bits(data, register_ptr, 0, 2);
 						pass.wrap_v = extract_bits(data, register_ptr, 2, 2);
 						pass.wrap_params = [
-							extract_bits(data, register_ptr, 10, 4),
-							extract_bits(data, register_ptr, 10, 14),
-							extract_bits(data, register_ptr, 10, 24),
-							extract_bits(data, register_ptr, 10, 34)
+							extract_bits(data, register_ptr, 4, 10),
+							extract_bits(data, register_ptr, 14, 10),
+							extract_bits(data, register_ptr, 24, 10),
+							extract_bits(data, register_ptr, 34, 10)
 						];
 						break;
 					case GsRegister.ALPHA_1:
@@ -187,6 +202,9 @@ export class MaterialsChunk {
 			dv.setUint16(mat_ptr+0x22, material.passes[0].texture_location[0], true);
 			dv.setUint16(mat_ptr+0x26, material.texture_file >= 0 ? material.passes.length : 0, true);
 			dv.setInt8(mat_ptr+0x28, material.texture_file);
+			if(material.passes[0].animated || material.passes[1]?.animated) {
+				dv.setInt8(mat_ptr+0x2B, 1);
+			}
 
 			for(let j = 0; j < 2; j++) {
 				let info_ptr = mat_ptr + 0x30 + 0x50*j;
@@ -213,8 +231,26 @@ export class MaterialsChunk {
 					let pass = material.passes[k];
 					dv.setInt16(info_ptr + 0x10 + 0x10*k, k + material.passes.length, true);
 					dv.setInt16(info_ptr + 0x14 + 0x10*k, pass.shader_type, true);
-					dv.setInt16(info_ptr + 0x18 + 0x10*k, 0x23, true);
-					dv.setInt16(info_ptr + 0x1C + 0x10*k, pass.metallic ? 1 : 2, true);
+					if(pass.shader_type === ShaderType.Unlit)
+						dv.setInt16(info_ptr + 0x18 + 0x10*k, 0x23, true);
+					else if(pass.shader_type === ShaderType.LitRigged)
+						dv.setInt16(info_ptr + 0x18 + 0x10*k, 0x3b, true);
+					else if(pass.shader_type === ShaderType.SpecularRigged)
+						dv.setInt16(info_ptr + 0x18 + 0x10*k, 0x3f, true);
+					else
+						dv.setInt16(info_ptr + 0x18 + 0x10*k, 0x27, true);
+					if(pass.animated)
+						dv.setInt16(info_ptr + 0x1C + 0x10*k, 3, true);
+					else if(pass.metallic)
+						dv.setInt16(info_ptr + 0x1C + 0x10*k, 1, true);
+					else if(pass.scroll_rate_x !== 0 || pass.scroll_rate_y !== 0)
+						dv.setInt16(info_ptr + 0x1C + 0x10*k, 2, true);
+
+					
+					pass.animate_num_frames = dv.getFloat32(mat_ptr + 0x0 + 0x10*j, true);
+					pass.animate_num_frames_x = dv.getFloat32(mat_ptr + 0x4 + 0x10*j, true);
+					pass.animate_num_frames_y = dv.getFloat32(mat_ptr + 0x8 + 0x10*j, true);
+					pass.animate_frame_delay = dv.getFloat32(mat_ptr + 0xC + 0x10*j, true);
 
 					dv.setFloat32(info_ptr + 0x30 + 0x10*k, pass.scroll_rate_x, true);
 					dv.setFloat32(info_ptr + 0x34 + 0x10*k, pass.scroll_rate_y, true);
@@ -244,20 +280,20 @@ export class MaterialsChunk {
 
 					data[gif_ptr+8] = k ? GsRegister.MIPTBP1_1 : GsRegister.MIPTBP1_2;
 					if(pass.texture_location.length >= 1)
-						insert_bits(data, gif_ptr, 14, 0, pass.texture_location[1]);
+						insert_bits(data, gif_ptr, 0, 14, pass.texture_location[1]);
 					if(pass.texture_location.length >= 2)
-						insert_bits(data, gif_ptr, 14, 20, pass.texture_location[2]);
+						insert_bits(data, gif_ptr, 20, 14, pass.texture_location[2]);
 					if(pass.texture_location.length >= 3)
-						insert_bits(data, gif_ptr, 14, 40, pass.texture_location[3]);
+						insert_bits(data, gif_ptr, 40, 14, pass.texture_location[3]);
 					gif_ptr += 16;
 
 					data[gif_ptr+8] = k ? GsRegister.CLAMP_1 : GsRegister.CLAMP_2;
 					insert_bits(data, gif_ptr, 0, 2, pass.wrap_h);
 					insert_bits(data, gif_ptr, 2, 2, pass.wrap_v);
-					insert_bits(data, gif_ptr, 10, 4, pass.wrap_params[0]);
-					insert_bits(data, gif_ptr, 10, 14, pass.wrap_params[1]);
-					insert_bits(data, gif_ptr, 10, 24, pass.wrap_params[2]);
-					insert_bits(data, gif_ptr, 10, 34, pass.wrap_params[3]);
+					insert_bits(data, gif_ptr, 4, 10, pass.wrap_params[0]);
+					insert_bits(data, gif_ptr, 14, 10, pass.wrap_params[1]);
+					insert_bits(data, gif_ptr, 24, 10, pass.wrap_params[2]);
+					insert_bits(data, gif_ptr, 34, 10, pass.wrap_params[3]);
 					gif_ptr += 16;
 
 					data[gif_ptr+8] = k ? GsRegister.ALPHA_1 : GsRegister.ALPHA_2;

@@ -9,7 +9,7 @@ import { VifCode, VifCodeType } from "../ps2/vifcode.js";
 import { apply_matrix, cross_product, distance_sq, distance_xz_sq, dot_product, identity_matrix, insert_bits, linear_to_srgb, Matrix, matrix_multiply, normalize_vector, srgb_to_linear, transform_to_matrix, triangle_height, triangle_normal, Vec3, Vec4, within_triangle_xz } from "../utils/misc.js";
 import { GlTf, MeshPrimitive, Node } from "./gltf.js";
 
-interface GltfImport {
+export interface GltfImport {
 	model : ModelChunk;
 	collision? : CollisionChunk;
 }
@@ -119,6 +119,7 @@ class GlTfImporter {
 					display_mask: lod_group_holder.display_mask,
 					fade_rate: lod_group_holder.fade_rate,
 					render_distance: lod_group_holder.render_distance,
+					sort_order: lod_group_holder.sort_order,
 					c1: null,
 					c2: null,
 					c3: this.encode_meshes(lod_group_holder.nodes),
@@ -239,7 +240,7 @@ class GlTfImporter {
 		qwords_per_vertex += ntdf_material.passes.length;
 		if(shader_type == ShaderType.Lit) qwords_per_vertex++;		
 		else if(shader_type == ShaderType.LitRigged) qwords_per_vertex += 3;
-		else if(shader_type == ShaderType.WaterSheen) qwords_per_vertex++;
+		else if(shader_type == ShaderType.UnlitNormals) qwords_per_vertex++;
 		let max_vertices_per_part = Math.floor((205 - ntdf_material.passes.length) / qwords_per_vertex);
 
 		let strips = this.stripify_primitive(primitive, max_vertices_per_part);
@@ -1103,11 +1104,17 @@ class GlTfImporter {
 		}
 		if(node.extras?.render_distance || (node.extras?.display_mask != undefined && node.extras?.display_mask != lod_group.display_mask)) {
 			let old = lod_group;
+			if(node.extras?.sort_order != undefined) {
+				let so = node.extras.sort_order;
+				assert(typeof so === "number", "sort_order is not a number, but " + so + " on node " + node.name);
+				assert(so >= 0 && so < 4, "sort_order must be from 0 to 3, is " + so + " on node " + node.name);
+			}
 			lod_group = {
 				nodes: [],
 				fade_rate: node.extras?.fade_rate ?? 0,
 				display_mask: node.extras?.display_mask ?? old.display_mask,
-				render_distance: node.extras?.render_distance ?? old.render_distance
+				render_distance: node.extras?.render_distance ?? old.render_distance,
+				sort_order: node.extras?.sort_order ?? old.sort_order
 			};
 			zone_holder.lod_groups.push(lod_group);
 		}
@@ -1127,6 +1134,7 @@ class GlTfImporter {
 			nodes: [],
 			fade_rate: 0,
 			display_mask: 0,
+			sort_order: 0,
 			render_distance: 10000
 		};
 		return this.zone_holders[zone_id] = {
@@ -1148,4 +1156,5 @@ interface LodGroupHolder {
 	fade_rate : number;
 	display_mask : number;
 	render_distance : number;
+	sort_order : number;
 }

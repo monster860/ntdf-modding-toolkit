@@ -8,6 +8,8 @@ import { CollisionChunk } from "./collision.js";
 export interface GridItem {
 	load_id : number;
 	collision_refs : GridCollisionRef[];
+	fine_collision_refs : number[];
+	breakable_refs : number[];
 }
 
 export interface GridCollisionRef {
@@ -66,9 +68,25 @@ export class GridChunk {
 				});
 			}
 
+			let fine_collision_refs : number[] = [];
+			let num_fine_collision_refs = dv.getUint32(pointer + 0x0, true);
+			let fine_collision_refs_ptr = dv.getUint32(pointer + 0x4, true) + pointer;
+			for(let i = 0; i < num_fine_collision_refs; i++) {
+				fine_collision_refs.push(dv.getUint32(fine_collision_refs_ptr + 4*i, true));
+			}
+
+			let breakable_refs : number[] = [];
+			let num_breakable_refs = dv.getUint32(pointer + 0x10, true);
+			let breakable_refs_ptr = dv.getUint32(pointer + 0x14, true) + pointer;
+			for(let i = 0; i < num_breakable_refs; i++) {
+				breakable_refs.push(dv.getUint32(breakable_refs_ptr + 4*i, true));
+			}
+
 			grid[y*grid_width+x] = {
 				load_id,
-				collision_refs
+				collision_refs,
+				fine_collision_refs,
+				breakable_refs
 			};
 		}
 
@@ -87,8 +105,12 @@ export class GridChunk {
 			if(!grid_item) continue;
 			reservations.set(grid_item, total_length);
 			total_length += 0x1C;
+			reservations.set(grid_item.fine_collision_refs, total_length);
+			total_length += 4*grid_item.fine_collision_refs.length;
 			reservations.set(grid_item.collision_refs, total_length);
 			total_length += 0x14*grid_item.collision_refs.length;
+			reservations.set(grid_item.breakable_refs, total_length);
+			total_length += 4*grid_item.breakable_refs.length;
 			for(let collision_ref of grid_item.collision_refs) {
 				reservations.set(collision_ref.boundary_indices, total_length);
 				total_length += 4*collision_ref.boundary_indices.length;
@@ -118,7 +140,11 @@ export class GridChunk {
 			dv.setUint16(ptr+0x18, item.load_id, true);
 
 			let collision_refs_ptr = reservations.get(item.collision_refs);
+			let fine_collision_refs_ptr = reservations.get(item.fine_collision_refs);
+			let breakable_refs_ptr = reservations.get(item.breakable_refs);
 			assert(collision_refs_ptr);
+			assert(fine_collision_refs_ptr);
+			assert(breakable_refs_ptr);
 			dv.setUint32(ptr+0x8, item.collision_refs.length, true);
 			dv.setUint32(ptr+0xC, collision_refs_ptr - ptr, true);
 			for(let i = 0; i < item.collision_refs.length; i++) {
@@ -135,6 +161,18 @@ export class GridChunk {
 					dv.setUint32(boundary_indices_ptr + j*4, collision_ref.boundary_indices[j]*0x70 + 0x60, true);
 				}
 			}
+			
+			dv.setUint32(ptr+0x0, item.fine_collision_refs.length, true);
+			dv.setUint32(ptr+0x4, fine_collision_refs_ptr - ptr, true);
+			for(let i = 0; i < item.fine_collision_refs.length; i++) {
+				dv.setUint32(fine_collision_refs_ptr+i*4, item.fine_collision_refs[i], true);
+			}
+
+			dv.setUint32(ptr+0x10, item.breakable_refs.length, true);
+			dv.setUint32(ptr+0x14, breakable_refs_ptr - ptr, true);
+			for(let i = 0; i < item.breakable_refs.length; i++) {
+				dv.setUint32(breakable_refs_ptr+i*4, item.breakable_refs[i], true);
+			}
 		}
 
 		return new Blob([dv.buffer]);
@@ -147,6 +185,8 @@ export class GridChunk {
 		if(item) return item;
 		return this.grid[i] = {
 			collision_refs: [],
+			fine_collision_refs: [],
+			breakable_refs: [],
 			load_id: 0
 		};
 	}
@@ -218,42 +258,65 @@ export class GridChunk {
 		}
 		for(let collision_chunk of file.get_chunks_of_type(ChunkType.Collision)) {
 			let collision = await CollisionChunk.from_blob(collision_chunk.contents);
-			this.num_collision_chunks = Math.max(this.num_collision_chunks, collision.id + 1);
-
-			for(let [index, object] of collision.objects.entries()) {
-				for(let [x,z] of this.get_tiles_in_rect(object.aabb_start[0]-1.075, object.aabb_start[1]-1.075, object.aabb_end[0]+1.075, object.aabb_end[1]+1.075)) {
-					let tile_shape = [[[
-						[this.x+x*this.scale, -this.z-z*this.scale],
-						[this.x+x*this.scale, -this.z-(z+1)*this.scale],
-						[this.x+(x+1)*this.scale, -this.z-(z+1)*this.scale],
-						[this.x+(x+1)*this.scale, -this.z-z*this.scale],
-						[this.x+x*this.scale, -this.z-z*this.scale],
-					]]];
-					let boundary_indices : number[] = [];
-					for(let [bound_index, bound] of object.bounds.entries()) {
-						let inv_mat = matrix_inverse(matrix_transpose([...bound.matrix, 0, 0, 0, 1]));
-						assert(inv_mat, "Collision boundary has a degenerate matrix");
-						let dl = apply_matrix(inv_mat, [0, -1.175, 0]);
-						let dr = apply_matrix(inv_mat, [0, bound.width+1.175, 0]);
-						let bound_shape = [[[
-							[dl[0]-bound.matrix[0]*0.3,-dl[2]+bound.matrix[2]*0.3],
-							[dr[0]+bound.matrix[0]*1.175,-dr[2]-bound.matrix[2]*1.175],
-							[dr[0]+bound.matrix[0]*1.175,-dr[2]-bound.matrix[2]*1.175],
-							[dr[0]-bound.matrix[0]*0.3,-dr[2]+bound.matrix[2]*0.3],
-							[dl[0]-bound.matrix[0]*0.3,-dl[2]+bound.matrix[2]*0.3]
-						]]];
-						if(intersection(bound_shape, tile_shape)?.length) boundary_indices.push(bound_index);
-					}
-					this.get_or_create_tile(x,z).collision_refs.push({
-						chunk_id: collision.id,
-						id: index,
-						boundary_indices: boundary_indices
-					});
-				}
-			}
+			
+			this.add_collision(collision);
 		}
 		
 		if(do_trim) this.trim();
+	}
+
+	/**
+	 * Adds references to collision objects.
+	 * @param collision 
+	 */
+	add_collision(collision : CollisionChunk) {
+		this.num_collision_chunks = Math.max(this.num_collision_chunks, collision.id + 1);
+		this.remove_collision(collision);
+
+		for(let [index, object] of collision.objects.entries()) {
+			for(let [x,z] of this.get_tiles_in_rect(object.aabb_start[0]-1.075, object.aabb_start[1]-1.075, object.aabb_end[0]+1.075, object.aabb_end[1]+1.075)) {
+				let tile_shape = [[[
+					[this.x+x*this.scale, -this.z-z*this.scale],
+					[this.x+x*this.scale, -this.z-(z+1)*this.scale],
+					[this.x+(x+1)*this.scale, -this.z-(z+1)*this.scale],
+					[this.x+(x+1)*this.scale, -this.z-z*this.scale],
+					[this.x+x*this.scale, -this.z-z*this.scale],
+				]]];
+				let boundary_indices : number[] = [];
+				for(let [bound_index, bound] of object.bounds.entries()) {
+					let inv_mat = matrix_inverse(matrix_transpose([...bound.matrix, 0, 0, 0, 1]));
+					assert(inv_mat, "Collision boundary has a degenerate matrix");
+					let dl = apply_matrix(inv_mat, [0, -1.175, 0]);
+					let dr = apply_matrix(inv_mat, [0, bound.width+1.175, 0]);
+					let bound_shape = [[[
+						[dl[0]-bound.matrix[0]*0.3,-dl[2]+bound.matrix[2]*0.3],
+						[dr[0]+bound.matrix[0]*1.175,-dr[2]-bound.matrix[2]*1.175],
+						[dr[0]+bound.matrix[0]*1.175,-dr[2]-bound.matrix[2]*1.175],
+						[dr[0]-bound.matrix[0]*0.3,-dr[2]+bound.matrix[2]*0.3],
+						[dl[0]-bound.matrix[0]*0.3,-dl[2]+bound.matrix[2]*0.3]
+					]]];
+					if(intersection(bound_shape, tile_shape)?.length) boundary_indices.push(bound_index);
+				}
+				this.get_or_create_tile(x,z).collision_refs.push({
+					chunk_id: collision.id,
+					id: index,
+					boundary_indices: boundary_indices
+				});
+			}
+		}
+	}
+	
+	/**
+	 * Removes references to collision objects with matching ID
+	 * @param collision Collision chunk or ID of collision chunk
+	 */
+	remove_collision(collision : CollisionChunk|number) {
+		let id = (typeof collision === "number") ? collision : collision.id;
+		for(let item of this.grid) {
+			if(item) {
+				item.collision_refs = item.collision_refs.filter(ref => ref.chunk_id !== id);
+			}
+		}
 	}
 
 	/**
@@ -268,7 +331,7 @@ export class GridChunk {
 		for(let z = 0; z < this.height; z++) for(let x = 0; x < this.width; x++) {
 			let tile = this.grid[z*this.width+x];
 			if(!tile) continue;
-			if(tile.load_id == 0 && tile.collision_refs.length == 0) {
+			if(tile.load_id == 0 && tile.collision_refs.length == 0 && tile.fine_collision_refs.length == 0 && tile.breakable_refs.length == 0) {
 				this.grid[z*this.width+x] = undefined;
 				continue;
 			}

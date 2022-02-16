@@ -4,23 +4,26 @@ import { PNG } from "pngjs";
 import { CollisionBoundary, CollisionChunk, FloorMaterial, FloorType } from "../chunks/collision.js";
 import { ImageChunk } from "../chunks/image.js";
 import { MaterialsChunk, ShaderType } from "../chunks/materials.js";
-import { ModelChunk, ModelNode, ModelNodeMesh, ModelNodeType } from "../chunks/model.js";
+import { BufferList, ModelChunk, ModelNode, ModelNodeMesh, ModelNodeType } from "../chunks/model.js";
 import { GsAlphaParam, GsColorParam, GsFilter, GsStorageFormat, GsWrapMode } from "../ps2/gs_constants.js";
 import { VifCodeType } from "../ps2/vifcode.js";
-import { apply_matrix, distance_xz_sq, matrix_inverse, matrix_transpose, srgb_to_linear, Vec3 } from "../utils/misc.js";
+import { apply_matrix, cross_product, distance_xz_sq, matrix_inverse, matrix_transpose, normalize_vector, srgb_to_linear, Vec3 } from "../utils/misc.js";
 import { GlTf, Material, Mesh, MeshPrimitive, Node, Scene } from "./gltf.js";
 import earcut from "earcut";
+import { Light, LightsChunk, LightType } from "../chunks/lights.js";
 
 export function export_gltf(materials : MaterialsChunk, images : ImageChunk[], parts : GlTfExportParts) {
 	let exporter = new GlTfExporter(materials, images);
 	if(parts.model) exporter.add_model(parts.model);
 	if(parts.collision) exporter.add_collision(parts.collision);
+	if(parts.lights) exporter.add_lights(parts.lights);
 	return exporter.finalize();
 }
 
-interface GlTfExportParts {
+export interface GlTfExportParts {
 	model? : ModelChunk;
 	collision? : CollisionChunk;
+	lights? : LightsChunk;
 }
 
 class GlTfExporter {
@@ -129,13 +132,13 @@ class GlTfExporter {
 		assert(model.root.type == ModelNodeType.Empty);
 		for(let zone_group of model.root.children) {
 			//scene.nodes?.push(this.encode_node(child, null));
-			assert(zone_group.type == ModelNodeType.ZoneGroup);
+			assert(zone_group.type == ModelNodeType.ZoneGroup || zone_group.type == ModelNodeType.Empty, "Expected empty or zone group as child of root node in model");
 			let first_item = zone_group.children[0];
 			let lodgroup_target = this.scene.nodes;
 			let lodgroup_parent_transform = [0,0,0];
 			let children_start = 0;
 			let zone_group_enc : Node|undefined;
-			if(zone_group.zone_id != 0) {
+			if(zone_group.type == ModelNodeType.ZoneGroup && zone_group.zone_id != 0) {
 				zone_group_enc = {
 					extras: {
 						zone_id: zone_group.zone_id
@@ -158,6 +161,8 @@ class GlTfExporter {
 					if(first_item.c3) {
 						zone_group_enc.mesh = this.encode_meshes(first_item.c3, zone_group.center);
 					}
+					if(first_item.c2) throw new Error("Unexpected c2 on node " + first_item.addr?.toString(16));
+					if(first_item.c1) throw new Error("Unexpected c1 on node " + first_item.addr?.toString(16));
 				}
 			}
 			for(let i = children_start; i < zone_group.children.length; i++) {
@@ -180,6 +185,8 @@ class GlTfExporter {
 				if(lod_group.c3) {
 					lod_group_enc.mesh = this.encode_meshes(lod_group.c3, lod_group.center);
 				}
+				if(lod_group.c2) throw new Error("Unexpected c2 on node " + lod_group.addr?.toString(16));
+				if(lod_group.c1) throw new Error("Unexpected c1 on node " + lod_group.addr?.toString(16));
 				lodgroup_target.push(this.nodes.length);
 				this.nodes.push(lod_group_enc);
 			}
@@ -191,124 +198,7 @@ class GlTfExporter {
 
 	add_collision(collision : CollisionChunk) {
 		for(let [object_index, object] of collision.objects.entries()) {
-			let vertices : Vec3[] = [];
-			let indices : number[] = [];
-
-			let has_heightmap = object.outer_grid_width > 0 && object.outer_grid_height > 0;
-
-			let loops : [number,number][][] = [];
-
-			let bounds_done = new Set<CollisionBoundary>();
-			for(let bound of object.bounds) {
-				let inv_mat = matrix_inverse(matrix_transpose([...bound.matrix, 0, 0, 0, 1]));
-				assert(inv_mat, "Collision boundary has a degenerate matrix");
-				let dl = apply_matrix(inv_mat, [0, 0, 0]);
-				let dr = apply_matrix(inv_mat, [0, bound.width, 0]);
-				let ur = apply_matrix(inv_mat, [0, bound.width, bound.height]);
-				let ul = apply_matrix(inv_mat, [0, 0, bound.height]);
-
-				if(distance_xz_sq(dl, ul) > 0.00001 || distance_xz_sq(dr, ur)  > 0.00001) {
-					throw new Error("Encountered unsupported collision object " + object_index + " with non-vertical walls");
-				}
-
-				let loop : [number,number][] = [[ul[0], -ul[2]]]
-				if(!bounds_done.has(bound)) {
-					bounds_done.add(bound);
-					let next_bound = bound;
-					while(next_bound.to_right != undefined) {
-						next_bound = object.bounds[next_bound.to_right];
-						if(bounds_done.has(next_bound)) {
-							if(next_bound == bound) {
-								loop.push(loop[0]);
-								loops.push(loop);
-							}
-							break;
-						}
-						bounds_done.add(next_bound); 
-						let next_inv_mat = matrix_inverse(matrix_transpose([...next_bound.matrix, 0, 0, 0, 1]));
-						assert(next_inv_mat, "Collision boundary has a degenerate matrix");
-						let next_ul = apply_matrix(next_inv_mat, [0, 0, next_bound.height]);
-						loop.push([next_ul[0], -next_ul[2]]);
-					}
-				}
-
-				let curr_i = vertices.length;
-				vertices.push(dl, dr, ur, ul);
-				
-				indices.push(curr_i, curr_i+1, curr_i+2, curr_i, curr_i+2, curr_i+3);
-			}
-
-			if(has_heightmap) {
-				let grid_i = 0;
-				for(let oy = 0; oy < object.outer_grid_height; oy++) for(let ox = 0; ox < object.outer_grid_width; ox++) {
-					let inner_grid = object.heightmap_grid[grid_i++];
-					if(!inner_grid) continue;
-
-					let base_x = object.aabb_start[0] + ox*object.outer_tile_size;
-					let base_y = object.aabb_start[1] + oy*object.outer_tile_size;
-
-					let big_tile: [number,number][][] = [[
-						[base_x, -(base_y)],
-						[base_x, -(base_y+object.outer_tile_size)],
-						[base_x+object.outer_tile_size, -(base_y+object.outer_tile_size)],
-						[base_x+object.outer_tile_size, -(base_y)]
-					]];
-					big_tile[0].push(big_tile[0][0]);
-
-					if(loops.length && diff(big_tile, loops).length) {
-						for(let iy = 0; iy < object.inner_grid_size-1; iy++) for(let ix = 0; ix < object.inner_grid_size-1; ix++) {
-							let small_tile: [number,number][][] = [[
-								[base_x+ix*object.inner_tile_size, -(base_y+iy*object.inner_tile_size)],
-								[base_x+ix*object.inner_tile_size, -(base_y+(iy+1)*object.inner_tile_size)],
-								[base_x+(ix+1)*object.inner_tile_size, -(base_y+(iy+1)*object.inner_tile_size)],
-								[base_x+(ix+1)*object.inner_tile_size, -(base_y+iy*object.inner_tile_size)],
-								[base_x+ix*object.inner_tile_size, -(base_y+iy*object.inner_tile_size)],
-							]];
-							let intersected = intersection(small_tile, loops) as MultiPolygon;
-							if(!intersected) continue;
-							for(let sub_tile of intersected) {
-								if(!sub_tile) continue;
-								//console.log(JSON.stringify(sub_tile));
-								sub_tile = sub_tile.filter(i => i.length >= 4);
-								for(let item of sub_tile) { // remove duplicate point
-									item.length--;
-								}
-								if(!sub_tile || !sub_tile.length) continue;
-								let data = earcut.flatten(sub_tile);
-								let triangulation = earcut(data.vertices, data.holes, data.dimensions);
-								let poly_indices : number[] = [];
-								for(let i = 0; i < data.vertices.length; i += 2) {
-									vertices.push([
-										data.vertices[i],
-										object.get_heightmap_y(data.vertices[i], -data.vertices[i+1], true),
-										-data.vertices[i+1]
-									]);
-									poly_indices.push(vertices.length-1);
-								}
-								indices.push(...triangulation.map(index => poly_indices[index]));
-							}
-						}
-					} else {
-						let curr_i = vertices.length;
-						for(let iy = 0; iy < object.inner_grid_size; iy++) for(let ix = 0; ix < object.inner_grid_size; ix++) {
-							vertices.push([
-								ix*object.inner_tile_size + base_x,
-								inner_grid[iy*object.inner_grid_size+ix],
-								iy*object.inner_tile_size + base_y
-							]);
-						}
-						for(let iy = 0; iy < object.inner_grid_size-1; iy++) for(let ix = 0; ix < object.inner_grid_size-1; ix++) {
-							let base = curr_i + iy*object.inner_grid_size + ix;
-							indices.push(base);
-							indices.push(base+object.inner_grid_size);
-							indices.push(base+1);
-							indices.push(base+1);
-							indices.push(base+object.inner_grid_size);
-							indices.push(base+object.inner_grid_size+1);
-						}
-					}
-				}
-			}
+			let {vertices, indices} = object.to_mesh(object_index);
 
 			let mesh_primitive : MeshPrimitive = {
 				attributes: {
@@ -329,17 +219,16 @@ class GlTfExporter {
 				count: indices.length
 			});
 
-			let flat_verts = vertices.flat();
-			let vertices_dv = new DataView(new ArrayBuffer(flat_verts.length * 4));
-			for(let i = 0; i < flat_verts.length; i++) {
-				vertices_dv.setFloat32(i*4, flat_verts[i], true);
+			let vertices_dv = new DataView(new ArrayBuffer(vertices.length * 4));
+			for(let i = 0; i < vertices.length; i++) {
+				vertices_dv.setFloat32(i*4, vertices[i], true);
 			}
 			mesh_primitive.attributes.POSITION = this.accessor_buffers.length;
 			this.accessor_buffers.push({
 				componentType: 5126,
 				type: "VEC3",
 				buffer: vertices_dv.buffer,
-				count: vertices.length
+				count: vertices.length/3
 			});
 
 			this.scene.nodes.push(this.nodes.length);
@@ -362,6 +251,64 @@ class GlTfExporter {
 			node.extras.zone_id = object.zone;
 			node.extras.heightmap_resolution = object.inner_tile_size;
 		}
+	}
+
+	add_lights(lights : LightsChunk) {
+		for(let i = 0; i < lights.groups.length; i++) {
+			let group = lights.groups[i];
+			if(group.lights) {
+				for(let j = 0; j < group.lights.length; j++) {
+					this.scene.nodes.push(this.add_light_node(group.lights[j], `${i}_${j}`));
+				}
+			}
+			if(group.base_lights) {
+				for(let j = 0; j < group.base_lights.length; j++) {
+					this.scene.nodes.push(this.add_light_node(group.base_lights[j], `${i}_${j}`, "Base_"));
+				}
+			}
+			if(group.base_ambient_light) {
+				this.scene.nodes.push(this.add_light_node(group.base_ambient_light, i, "BaseAmbient_"));
+			}
+		}
+	}
+
+	add_light_node(light : Light, id : number|string, name_prefix = "", base_position? : Vec3) : number {
+		let light_obj = {
+			"type": light.type === LightType.Directional ? "directional" : "point",
+			"intensity": light.intensity**2 * (light.type === LightType.Directional ? 40 : 40000),
+			"range": light.range > 0 ? light.range : undefined,
+			"color": light.color.map(a => srgb_to_linear(a/255)),
+			"extras": {} as any
+		};
+		if(light.type === LightType.Ambient) {
+			light_obj.extras.ambient = true;
+		}
+		let light_index = this.lights.length;
+		this.lights.push(light_obj);
+		
+		let dir_vec = light.direction.map(a => -a) as [number,number,number];
+		let dir_perp_1 = normalize_vector(cross_product(dir_vec, [dir_vec[1], dir_vec[2], dir_vec[0]]));
+		let dir_perp_2 = normalize_vector(cross_product(dir_vec, dir_perp_1));
+		let node : Node = {
+			matrix: [
+				...dir_perp_1, 0,
+				...dir_perp_2, 0,
+				...dir_vec, 0,
+				...light.position, 1
+			],
+			name: `${name_prefix}${LightType[light.type]}${id}`,
+			extras: {
+				zone_id: light.zone_id
+			},
+			extensions: {
+				"KHR_lights_punctual": {
+					light: light_index
+				}
+			}
+		};
+		let node_index = this.nodes.length;
+		this.nodes.push(node);
+		return node_index;
 	}
 
 	finalize() {
@@ -463,6 +410,19 @@ class GlTfExporter {
 
 	collision_material : number;
 
+	get lights() : any[] {
+		if(!this.gltf.extensions) {
+			this.gltf.extensions = {};
+		}
+		if(!this.gltf.extensions["KHR_lights_punctual"]) {
+			this.gltf.extensions["KHR_lights_punctual"] = {};
+		}
+		if(!this.gltf.extensions["KHR_lights_punctual"].lights) {
+			this.gltf.extensions["KHR_lights_punctual"].lights = [];
+		}
+		return this.gltf.extensions["KHR_lights_punctual"].lights;
+	}
+
 	*iterate_meshes(node : ModelNode) : IterableIterator<ModelNodeMesh> {
 		if(node.type == ModelNodeType.Mesh) {
 			yield node;
@@ -510,6 +470,8 @@ class GlTfExporter {
 			});
 		} else if(node.type == ModelNodeType.ZoneGroup) {
 			encoded_node.extras["zone_id"] = node.zone_id;
+		} else {
+			throw new Error("Unsupported node type " + node.type + " at " + node.addr?.toString(16));
 		}
 		if(children.length) encoded_node.children = children;
 		return index;
@@ -530,44 +492,7 @@ class GlTfExporter {
 	make_mesh_primitive(node : ModelNodeMesh, center : [number,number,number]) : MeshPrimitive {
 		let material = this.materials.materials[node.material];
 		let shader_type = material.passes[0].shader_type;
-		let buffer_list : BufferList = {num_vertices: new Uint8Array(node.initial_state)[0], vertex_start : 0};
-		let buffer_lists : BufferList[] = [];
-		let start_addr = (node.initial_state.byteLength / 16)|0;
-		for(let item of node.vif_code) {
-			if(item.type == VifCodeType.UNPACK) {
-				if(item.vn == 3 && item.vl == 0 && item.location == 0) {
-					buffer_list.num_vertices = new Uint8Array(item.data)[0];
-					continue;
-				}
-				let which = (item.location - start_addr) / buffer_list.num_vertices;
-				let size = item.num / buffer_list.num_vertices
-				if(which == 0 && item.vn == 2 && item.vl == 0) {
-					buffer_list.vertices = item.data;
-				} else if(which == 0 && item.vn == 0 && item.vl == 2) {
-					buffer_list.kick_flags = item.data;
-				} else if(which == 1 && item.vn == 3 && item.vl == 2) {
-					buffer_list.colors = item.data;
-				} else if(which == 2 && item.vn == 2 && item.vl == 0 && shader_type != ShaderType.Unlit) {
-					buffer_list.normals = item.data;
-				} else if(item.vn == 1 && item.vl == 0) {
-					if(size == 2) {
-						buffer_list.uv = item.data.slice(0, 8*buffer_list.num_vertices);
-						buffer_list.uv2 = item.data.slice(8*buffer_list.num_vertices, 16*buffer_list.num_vertices);
-					} else {
-						buffer_list.uv = item.data;
-					}
-				} else if(which == 3 && item.vn == 2 && item.vl == 0 && shader_type == ShaderType.LitRigged) {
-					buffer_list.weights = item.data;
-				} else if(which == 4 && item.vn == 3 && item.vl == 2 && shader_type == ShaderType.LitRigged) {
-					buffer_list.joints = item.data;
-				}
-			} else if(item.type == VifCodeType.MSCNT) {
-				buffer_lists.push({...buffer_list});
-				buffer_list.vertex_start += buffer_list.num_vertices;
-			}
-		}
-		buffer_lists.push({...buffer_list});
-		buffer_list.vertex_start += buffer_list.num_vertices;
+		let [buffer_lists, total_verts] = ModelChunk.get_mesh_buffers(node);
 
 		let mesh_primitive : MeshPrimitive = {
 			attributes: {
@@ -576,7 +501,7 @@ class GlTfExporter {
 			material: node.material
 		}
 
-		let verts_dv = new DataView(new ArrayBuffer(buffer_list.vertex_start * 12));
+		let verts_dv = new DataView(new ArrayBuffer(total_verts * 12));
 		let index = 0;
 		for(let list of buffer_lists) {
 			assert(list.vertices != null)
@@ -592,11 +517,11 @@ class GlTfExporter {
 		this.accessor_buffers.push({
 			componentType: 5126,
 			buffer: verts_dv.buffer,
-			count: buffer_list.vertex_start,
+			count: total_verts,
 			type: "VEC3"
 		});
 
-		if(buffer_list.normals) {
+		if(buffer_lists[0].normals) {
 			let normals_buffer = array_buffer_concat(...buffer_lists.map(item => {
 				assert(item.normals);
 				return item.normals;
@@ -605,12 +530,12 @@ class GlTfExporter {
 			this.accessor_buffers.push({
 				componentType: 5126,
 				buffer: normals_buffer,
-				count: buffer_list.vertex_start,
+				count: total_verts,
 				type: "VEC3"
 			});
 		}
 		
-		if(buffer_list.uv) {
+		if(buffer_lists[0].uv) {
 			let uv_buffer = array_buffer_concat(...buffer_lists.map(item => {
 				assert(item.uv);
 				return item.uv;
@@ -619,12 +544,12 @@ class GlTfExporter {
 			this.accessor_buffers.push({
 				componentType: 5126,
 				buffer: uv_buffer,
-				count: buffer_list.vertex_start,
+				count: total_verts,
 				type: "VEC2"
 			});
 		}
 
-		if(buffer_list.uv2) {
+		if(buffer_lists[0].uv2) {
 			let uv2_buffer = array_buffer_concat(...buffer_lists.map(item => {
 				assert(item.uv2);
 				return item.uv2;
@@ -633,13 +558,13 @@ class GlTfExporter {
 			this.accessor_buffers.push({
 				componentType: 5126,
 				buffer: uv2_buffer,
-				count: buffer_list.vertex_start,
+				count: total_verts,
 				type: "VEC2"
 			});
 		}
 
-		if(buffer_list.colors) {
-			let colors_dv = new DataView(new ArrayBuffer(buffer_list.vertex_start * 16));
+		if(buffer_lists[0].colors) {
+			let colors_dv = new DataView(new ArrayBuffer(total_verts * 16));
 			index = 0;
 			let one_level = shader_type == ShaderType.Unlit ? 0x80 : 0x10;
 			let multiplier = material.texture_file >= 0 ? 1 : 0.5;
@@ -660,13 +585,13 @@ class GlTfExporter {
 			this.accessor_buffers.push({
 				componentType: 5126,
 				buffer: colors_dv.buffer,
-				count: buffer_list.vertex_start,
+				count: total_verts,
 				type: "VEC4",
 				normalized: true
 			});
 		}
 
-		if(buffer_list.weights) {
+		if(buffer_lists[0].weights) {
 			let weights_buffer = array_buffer_concat(...buffer_lists.map(item => {
 				assert(item.weights);
 				return item.weights;
@@ -675,12 +600,12 @@ class GlTfExporter {
 			this.accessor_buffers.push({
 				componentType: 5126,
 				buffer: weights_buffer,
-				count: buffer_list.vertex_start,
+				count: total_verts,
 				type: "VEC3"
 			});
 		}
 
-		if(buffer_list.joints) {
+		if(buffer_lists[0].joints) {
 			let joints_buffer = array_buffer_concat(...buffer_lists.map(item => {
 				assert(item.joints);
 				return item.joints;
@@ -689,7 +614,7 @@ class GlTfExporter {
 			this.accessor_buffers.push({
 				componentType: 5121,
 				buffer: joints_buffer,
-				count: buffer_list.vertex_start,
+				count: total_verts,
 				type: "VEC4"
 			});
 		}
@@ -749,18 +674,6 @@ function array_buffer_concat(...buffers : ArrayBuffer[]) {
 	return buf.buffer;
 }
 
-interface BufferList {
-	vertices? : ArrayBuffer;
-	normals? : ArrayBuffer;
-	colors? : ArrayBuffer;
-	kick_flags? : ArrayBuffer;
-	uv? : ArrayBuffer;
-	uv2? : ArrayBuffer;
-	joints? : ArrayBuffer;
-	weights? : ArrayBuffer;
-	num_vertices : number;
-	vertex_start : number;
-}
 
 interface AccessorBuffer {
 	componentType: 5120|5121|5122|5123|5125|5126;

@@ -1,6 +1,9 @@
 import assert from "assert";
 import Blob from "cross-blob";
-import { lerp } from "../utils/misc.js";
+import earcut from "earcut";
+import { diff, intersection, MultiPolygon } from "martinez-polygon-clipping";
+import { apply_matrix, distance_xz_sq, lerp, matrix_inverse, matrix_transpose, Vec3 } from "../utils/misc.js";
+import { GridChunk } from "./grid.js";
 
 export class CollisionObject {
 	mask : number = 0;
@@ -60,6 +63,176 @@ export class CollisionObject {
 		let d = grid[(iz+1)*inner_size+(ix+1)];
 
 		return lerp(lerp(a, b, ix_float-ix), lerp(c, d, ix_float-ix), iz_float-iz);
+	}
+
+	to_mesh(object_index? : number, line_mode = false/*, expansion_grid? : GridChunk, expansion_id? : number*/) : {vertices: number[], indices: number[], types: number[]} {
+		let vertices : Vec3[] = [];
+		let indices : number[] = [];
+		let types : number[] = [];
+
+		let has_heightmap = this.outer_grid_width > 0 && this.outer_grid_height > 0;
+
+		let loops : [number,number][][] = [];
+
+		let bounds_done = new Set<CollisionBoundary>();
+		for(let bound of this.bounds) {
+			let inv_mat = matrix_inverse(matrix_transpose([...bound.matrix, 0, 0, 0, 1]));
+			if(!inv_mat) {
+				console.warn("Collision boundary has a degenerate matrix");
+				continue;
+			}
+			let dl = apply_matrix(inv_mat, [0, 0, 0]);
+			let dr = apply_matrix(inv_mat, [0, bound.width, 0]);
+			let ur = apply_matrix(inv_mat, [0, bound.width, bound.height]);
+			let ul = apply_matrix(inv_mat, [0, 0, bound.height]);
+
+			if(distance_xz_sq(dl, ul) > 0.00001 || distance_xz_sq(dr, ur)  > 0.00001) {
+				throw new Error("Encountered unsupported collision object " + object_index + " with non-vertical walls");
+			}
+
+			let loop : [number,number][] = [[ul[0], -ul[2]]]
+			if(!bounds_done.has(bound)) {
+				bounds_done.add(bound);
+				let next_bound = bound;
+				while(next_bound.to_right != undefined) {
+					next_bound = this.bounds[next_bound.to_right];
+					if(bounds_done.has(next_bound)) {
+						if(next_bound == bound) {
+							loop.push(loop[0]);
+							loops.push(loop);
+						}
+						break;
+					}
+					bounds_done.add(next_bound); 
+					let next_inv_mat = matrix_inverse(matrix_transpose([...next_bound.matrix, 0, 0, 0, 1]));
+					if(!next_inv_mat) {
+						console.warn("Collision boundary has a degenerate matrix");
+						continue;
+					}
+					let next_ul = apply_matrix(next_inv_mat, [0, 0, next_bound.height]);
+					loop.push([next_ul[0], -next_ul[2]]);
+				}
+			}
+
+			let curr_i = vertices.length;
+			vertices.push(dl, dr, ur, ul);
+			types.push(0,0,0,0);
+			
+			if(line_mode) {
+				indices.push(curr_i, curr_i+1);
+				indices.push(curr_i+1, curr_i+2);
+				indices.push(curr_i+2, curr_i+3);
+				indices.push(curr_i+3, curr_i);
+			} else {
+				indices.push(curr_i, curr_i+1, curr_i+2, curr_i, curr_i+2, curr_i+3);
+			}
+		}
+
+		if(has_heightmap) {
+			let grid_i = 0;
+			for(let oy = 0; oy < this.outer_grid_height; oy++) for(let ox = 0; ox < this.outer_grid_width; ox++) {
+				let inner_grid = this.heightmap_grid[grid_i++];
+				if(!inner_grid) continue;
+
+				let base_x = this.aabb_start[0] + ox*this.outer_tile_size;
+				let base_y = this.aabb_start[1] + oy*this.outer_tile_size;
+
+				let big_tile: [number,number][][] = [[
+					[base_x, -(base_y)],
+					[base_x, -(base_y+this.outer_tile_size)],
+					[base_x+this.outer_tile_size, -(base_y+this.outer_tile_size)],
+					[base_x+this.outer_tile_size, -(base_y)]
+				]];
+				big_tile[0].push(big_tile[0][0]);
+
+				if(loops.length && diff(big_tile, loops).length) {
+					for(let iy = 0; iy < this.inner_grid_size-1; iy++) for(let ix = 0; ix < this.inner_grid_size-1; ix++) {
+						let small_tile: [number,number][][] = [[
+							[base_x+ix*this.inner_tile_size, -(base_y+iy*this.inner_tile_size)],
+							[base_x+ix*this.inner_tile_size, -(base_y+(iy+1)*this.inner_tile_size)],
+							[base_x+(ix+1)*this.inner_tile_size, -(base_y+(iy+1)*this.inner_tile_size)],
+							[base_x+(ix+1)*this.inner_tile_size, -(base_y+iy*this.inner_tile_size)],
+							[base_x+ix*this.inner_tile_size, -(base_y+iy*this.inner_tile_size)],
+						]];
+						let intersected = intersection(small_tile, loops) as MultiPolygon;
+						if(!intersected) continue;
+						for(let sub_tile of intersected) {
+							if(!sub_tile) continue;
+							//console.log(JSON.stringify(sub_tile));
+							sub_tile = sub_tile.filter(i => i.length >= 4);
+							for(let item of sub_tile) { // remove duplicate point
+								item.length--;
+							}
+							if(!sub_tile || !sub_tile.length) continue;
+							if(line_mode) {
+								for(let part of sub_tile) {
+									let first_index = vertices.length;
+									for(let i = 0; i < part.length; i++) {
+										indices.push(vertices.length, i === part.length-1 ? first_index : vertices.length+1);
+										types.push(1, 1);
+										vertices.push([
+											part[i][0],
+											this.get_heightmap_y(part[i][0], -part[i][1], true),
+											-part[i][1]
+										]);
+										types.push(1);
+									}
+								}
+							} else {
+								let data = earcut.flatten(sub_tile);
+								let triangulation = earcut(data.vertices, data.holes, data.dimensions);
+								let poly_indices : number[] = [];
+								for(let i = 0; i < data.vertices.length; i += 2) {
+									vertices.push([
+										data.vertices[i],
+										this.get_heightmap_y(data.vertices[i], -data.vertices[i+1], true),
+										-data.vertices[i+1]
+									]);
+									types.push(1);
+									poly_indices.push(vertices.length-1);
+								}
+								indices.push(...triangulation.map(index => poly_indices[index]));
+							}
+						}
+					}
+				} else {
+					let curr_i = vertices.length;
+					for(let iy = 0; iy < this.inner_grid_size; iy++) for(let ix = 0; ix < this.inner_grid_size; ix++) {
+						vertices.push([
+							ix*this.inner_tile_size + base_x,
+							inner_grid[iy*this.inner_grid_size+ix],
+							iy*this.inner_tile_size + base_y
+						]);
+						types.push(1);
+					}
+					if(line_mode) {
+						for(let iy = 0; iy < this.inner_grid_size; iy++) for(let ix = 0; ix < this.inner_grid_size; ix++) {
+							let base = curr_i + iy*this.inner_grid_size + ix;
+							if(iy < this.inner_grid_size-1) {
+								indices.push(base);
+								indices.push(base+this.inner_grid_size);
+							}
+							if(ix < this.inner_grid_size-1) {
+								indices.push(base);
+								indices.push(base+1);
+							}
+						}
+					} else {
+						for(let iy = 0; iy < this.inner_grid_size-1; iy++) for(let ix = 0; ix < this.inner_grid_size-1; ix++) {
+							let base = curr_i + iy*this.inner_grid_size + ix;
+							indices.push(base);
+							indices.push(base+this.inner_grid_size);
+							indices.push(base+1);
+							indices.push(base+1);
+							indices.push(base+this.inner_grid_size);
+							indices.push(base+this.inner_grid_size+1);
+						}
+					}
+					
+				}
+			}
+		}
+		return {vertices: vertices.flat(), indices, types};
 	}
 }
 
@@ -169,8 +342,10 @@ export class CollisionChunk {
 				}
 				let width = dv.getFloat32(bound_ptr + 0x40, true);
 				let height = dv.getFloat32(bound_ptr + 0x44, true);
-				let to_right = (dv.getUint32(bound_ptr + 0x54, true) - bounds_ptr + ptr) / 0x70;
-				let to_left = (dv.getUint32(bound_ptr + 0x5C, true) - bounds_ptr + ptr) / 0x70;
+				let to_right : number|undefined = (dv.getUint32(bound_ptr + 0x54, true) - bounds_ptr + ptr) / 0x70;
+				if(to_right < 0) to_right = undefined;
+				let to_left : number|undefined = (dv.getUint32(bound_ptr + 0x5C, true) - bounds_ptr + ptr) / 0x70;
+				if(to_left < 0) to_left = undefined;
 				let z_size = dv.getFloat32(bound_ptr + 0x68, true);
 				object.bounds.push({
 					origin, matrix, width, height, z_size, to_left, to_right

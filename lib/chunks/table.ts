@@ -15,7 +15,7 @@ export enum TableFieldType {
 
 type TableField<T extends TableFieldType> = T extends TableFieldType.String ? string|null : number;
 
-type TableRowOf<T extends readonly TableFieldType[]> = {
+export type TableRowOf<T extends readonly TableFieldType[]> = {
 	-readonly [P in keyof T]: T[P] extends TableFieldType ? TableField<T[P]> : never
 }
 

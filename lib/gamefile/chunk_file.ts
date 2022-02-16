@@ -1,5 +1,6 @@
 import Blob from "cross-blob";
 import { GridChunk } from "../chunks/grid.js";
+import { MaterialsChunk } from "../chunks/materials.js";
 
 export enum ChunkType {
 	EOF = 0,
@@ -8,17 +9,21 @@ export enum ChunkType {
 	Image = 4,
 	Collision = 5,
 	ModelList = 8,
+	FineCollision = 11,
 	DynamicModel = 12,
 	Model = 13,
-	Skeleton = 18,
-	CharacterAssets = 18, // Not a typo, these really do have the same type ID.
+	CharacterAssets = 18,
+	Skeleton = 18, // Not a typo, these really do have the same type ID.
 	WorldGrid = 19,
+	InstancedModels = 20,
 	DynamicObjects = 29,
+	Lights = 30,
 	Header = 31,
 	AssetGroup = 32,
 	ShadowModel = 33,
 	ZoneVis = 35,
 	LevelDLL = 37,
+	Fog = 41,
 	Table = 42,
 	DialogueTable = 1000,
 	WorldInfo = 1001,
