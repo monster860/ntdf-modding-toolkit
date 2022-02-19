@@ -10,7 +10,10 @@ export * from "./chunks/instanced_models.js"
 export * from "./chunks/lights.js"
 export * from "./chunks/materials.js"
 export * from "./chunks/model.js"
+export * from "./chunks/sector_map.js"
 export * from "./chunks/table.js"
+
+export * from "./audio/vag.js"
 
 export * from "./gltf/gltf_export.js"
 export * from "./gltf/gltf_import.js"

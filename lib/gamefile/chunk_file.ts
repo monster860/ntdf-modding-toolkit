@@ -25,6 +25,7 @@ export enum ChunkType {
 	LevelDLL = 37,
 	Fog = 41,
 	Table = 42,
+	SectorMap = 43,
 	DialogueTable = 1000,
 	WorldInfo = 1001,
 }
