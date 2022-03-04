@@ -285,6 +285,9 @@ export class MaterialsChunk {
 						insert_bits(data, gif_ptr, 20, 14, pass.texture_location[2]);
 					if(pass.texture_location.length >= 3)
 						insert_bits(data, gif_ptr, 40, 14, pass.texture_location[3]);
+					insert_bits(data, gif_ptr, 14, 6, pass.texture_buffer_width);
+					insert_bits(data, gif_ptr, 34, 6, pass.texture_buffer_width);
+					insert_bits(data, gif_ptr, 54, 6, pass.texture_buffer_width);
 					gif_ptr += 16;
 
 					data[gif_ptr+8] = k ? GsRegister.CLAMP_1 : GsRegister.CLAMP_2;

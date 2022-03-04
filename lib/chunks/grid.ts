@@ -273,7 +273,13 @@ export class GridChunk {
 		this.num_collision_chunks = Math.max(this.num_collision_chunks, collision.id + 1);
 		this.remove_collision(collision);
 
+		let to_ignore = new Set<number>();
 		for(let [index, object] of collision.objects.entries()) {
+			if(index != object.water_splash_object) to_ignore.add(object.water_splash_object);
+		}
+
+		for(let [index, object] of collision.objects.entries()) {
+			if(to_ignore.has(index)) continue; // Water splash effects are visual only
 			for(let [x,z] of this.get_tiles_in_rect(object.aabb_start[0]-1.075, object.aabb_start[1]-1.075, object.aabb_end[0]+1.075, object.aabb_end[1]+1.075)) {
 				let tile_shape = [[[
 					[this.x+x*this.scale, -this.z-z*this.scale],
