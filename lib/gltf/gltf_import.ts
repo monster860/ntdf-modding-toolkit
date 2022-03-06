@@ -273,6 +273,8 @@ class GlTfImporter {
 		let positions = this.get_accessor(primitive.attributes.POSITION).data;
 		let normals = primitive.attributes.NORMAL != undefined ? this.get_accessor(primitive.attributes.NORMAL).data : undefined;
 		let colors = primitive.attributes.COLOR_0 != undefined ? this.get_accessor(primitive.attributes.COLOR_0).data : undefined;
+		let joints = primitive.attributes.JOINTS_0 != undefined ? this.get_accessor(primitive.attributes.JOINTS_0).data : undefined;
+		let weights = primitive.attributes.WEIGHTS_0 != undefined ? this.get_accessor(primitive.attributes.WEIGHTS_0).data : undefined;
 		//if(colors) for(let i = 0; i < colors.length; i++) if((i % 4) != 3) colors[i] = Math.random();
 		let has_alpha = colors?.length != positions.length;
 		let texcoords : number[][] = [];
@@ -438,6 +440,69 @@ class GlTfImporter {
 					use_tops: true,
 					vl: 0,
 					vn: 2
+				});
+				location += part_indices.length;
+			}
+
+			if(shader_type == ShaderType.LitRigged || shader_type == ShaderType.SpecularRigged) {
+				let weights_dv = new DataView(new ArrayBuffer(part_indices.length * 12));
+				let joints_dv = new DataView(new ArrayBuffer(part_indices.length * 4));
+
+				for(let i = 0; i < part_indices.length; i++) {
+					let this_weights : number[] = [1,0,0,0];
+					let this_joints : number[] = [0,0,0,0];
+					let index = part_indices[i];
+					if(weights) {
+						this_weights = [weights[index*4+0],weights[index*4+1],weights[index*4+2],weights[index*4+3]];
+					}
+					if(joints) {
+						this_joints = [joints[index*4+0],joints[index*4+1],joints[index*4+2],joints[index*4+3]];
+					}
+					let least = 1;
+					let least_index = 0;
+					for(let i = 0; i < 4; i++) {
+						if(this_weights[i] < least) {
+							least = this_weights[i];
+							least_index = i;
+						}
+					}
+					this_weights.splice(least_index, 1);
+					this_joints.splice(least_index, 1);
+					let inv_sum = 1/(this_weights[0] + this_weights[1] + this_weights[2]);
+					weights_dv.setFloat32(i*12 + 0, this_weights[0] * inv_sum, true);
+					weights_dv.setFloat32(i*12 + 4, this_weights[1] * inv_sum, true);
+					weights_dv.setFloat32(i*12 + 8, this_weights[2] * inv_sum, true);
+
+					joints_dv.setUint8(i*4 + 0, this_joints[0]);
+					joints_dv.setUint8(i*4 + 1, this_joints[1]);
+					joints_dv.setUint8(i*4 + 2, this_joints[2]);
+				}
+
+				vif_code.push({
+					type: VifCodeType.UNPACK,
+					data: weights_dv.buffer,
+					interrupt: false,
+					location,
+					masked: false,
+					num: part_indices.length,
+					unsigned: false,
+					use_tops: true,
+					vl: 0,
+					vn: 2
+				});
+				location += part_indices.length;
+
+				vif_code.push({
+					type: VifCodeType.UNPACK,
+					data: joints_dv.buffer,
+					interrupt: false,
+					location,
+					masked: false,
+					num: part_indices.length,
+					unsigned: true,
+					use_tops: true,
+					vl: 2,
+					vn: 3
 				});
 				location += part_indices.length;
 			}
@@ -1091,6 +1156,7 @@ class GlTfImporter {
 	absolute_transforms = new Map<Node, Matrix>();
 
 	propogate_transform(node : Node, transform : Matrix = identity_matrix, zone_holder = this.get_zone_holder(0), lod_group = zone_holder.main_lod_group) {
+		if(node.skin != undefined) transform = identity_matrix;
 		transform = matrix_multiply((node.matrix as Matrix|undefined) ?? transform_to_matrix(node.translation as Vec3|undefined, node.rotation as Vec4|undefined, node.scale as Vec3|undefined), transform);
 		this.absolute_transforms.set(node, transform);
 

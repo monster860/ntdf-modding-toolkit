@@ -7,7 +7,7 @@ import { MaterialsChunk, ShaderType } from "../chunks/materials.js";
 import { BufferList, ModelChunk, ModelNode, ModelNodeMesh, ModelNodeType } from "../chunks/model.js";
 import { GsAlphaParam, GsColorParam, GsFilter, GsStorageFormat, GsWrapMode } from "../ps2/gs_constants.js";
 import { VifCodeType } from "../ps2/vifcode.js";
-import { apply_matrix, cross_product, distance_xz_sq, matrix_inverse, matrix_transpose, normalize_vector, srgb_to_linear, Vec3 } from "../utils/misc.js";
+import { apply_matrix, cross_product, distance_xz_sq, dot_product, matrix_inverse, matrix_transpose, normalize_vector, srgb_to_linear, Vec3 } from "../utils/misc.js";
 import { GlTf, Material, Mesh, MeshPrimitive, Node, Scene } from "./gltf.js";
 import earcut from "earcut";
 import { Light, LightsChunk, LightType } from "../chunks/lights.js";
@@ -157,9 +157,15 @@ class GlTfExporter {
 					if(zone_group.children.length == 1) {
 						zone_group_enc.extras.fade_rate = first_item.fade_rate;
 						zone_group_enc.extras.display_mask = first_item.display_mask;
+						zone_group_enc.extras.sort_order = first_item.sort_order;
 					}
 					if(first_item.c3) {
+						this.max_bone_used = -1;
 						zone_group_enc.mesh = this.encode_meshes(first_item.c3, zone_group.center);
+						if(this.max_bone_used >= 0) {
+							zone_group_enc.skin = this.get_skin(this.max_bone_used);
+							if(this.dummy_skeleton) this.dummy_skeleton.translation = zone_group_enc.translation;
+						}
 					}
 					if(first_item.c2) throw new Error("Unexpected c2 on node " + first_item.addr?.toString(16));
 					if(first_item.c1) throw new Error("Unexpected c1 on node " + first_item.addr?.toString(16));
@@ -172,7 +178,8 @@ class GlTfExporter {
 					extras: {
 						fade_rate: lod_group.fade_rate,
 						display_mask: lod_group.display_mask,
-						render_distance: lod_group.render_distance
+						render_distance: lod_group.render_distance,
+						sort_order: lod_group.sort_order
 					},
 					translation: [
 						lod_group.center[0] - lodgroup_parent_transform[0],
@@ -183,7 +190,12 @@ class GlTfExporter {
 				};
 				if(lod_group.addr != undefined) lod_group_enc.name += "_0x" + lod_group.addr.toString(16);
 				if(lod_group.c3) {
+					this.max_bone_used = -1;
 					lod_group_enc.mesh = this.encode_meshes(lod_group.c3, lod_group.center);
+					if(this.max_bone_used >= 0) {
+						lod_group_enc.skin = this.get_skin(this.max_bone_used);
+						if(this.dummy_skeleton) this.dummy_skeleton.translation = lod_group_enc.translation;
+					}
 				}
 				if(lod_group.c2) throw new Error("Unexpected c2 on node " + lod_group.addr?.toString(16));
 				if(lod_group.c1) throw new Error("Unexpected c1 on node " + lod_group.addr?.toString(16));
@@ -408,7 +420,45 @@ class GlTfExporter {
 		nodes: [] as number[]
 	};
 
+	max_bone_used = -1;
+	dummy_skeleton_index : number|undefined = undefined;
+	dummy_skeleton : Node|undefined = undefined;
+	skin : number|undefined = undefined;
+
 	collision_material : number;
+
+	get_skin(max_bone_used : number) {
+		if(!this.dummy_skeleton || this.dummy_skeleton_index == undefined) {
+			this.dummy_skeleton_index = this.nodes.length;
+			this.dummy_skeleton = {
+				name: "Dummy Skeleton"
+			}
+			this.nodes.push(this.dummy_skeleton);
+			this.scene.nodes.push(this.dummy_skeleton_index);
+		}
+		if(!this.dummy_skeleton.children) this.dummy_skeleton.children = [];
+		while(max_bone_used >= this.dummy_skeleton.children.length) {
+			let index = this.nodes.length;
+			let bone_index = this.dummy_skeleton.children.length;
+			this.dummy_skeleton.children.push(index);
+			this.nodes.push(
+				{
+					name: "bone_" + bone_index,
+					extras: {"ntdf_bone_index": bone_index}
+				}
+			);
+		}
+		
+		if(this.skin == undefined) {
+			if(!this.gltf.skins) this.gltf.skins = [];
+			this.skin = this.gltf.skins.length;
+			this.gltf.skins.push({
+				joints: this.dummy_skeleton.children,
+				skeleton: this.dummy_skeleton_index
+			});
+		}
+		return this.skin;
+	}
 
 	get lights() : any[] {
 		if(!this.gltf.extensions) {
@@ -521,11 +571,16 @@ class GlTfExporter {
 			type: "VEC3"
 		});
 
+		let normals_arr : number[] = [];
 		if(buffer_lists[0].normals) {
 			let normals_buffer = array_buffer_concat(...buffer_lists.map(item => {
 				assert(item.normals);
 				return item.normals;
 			}));
+			let normals_dv = new DataView(normals_buffer);
+			for(let i = 0; i < normals_buffer.byteLength; i += 4) {
+				normals_arr.push(normals_dv.getFloat32(i, true));
+			}
 			mesh_primitive.attributes.NORMAL = this.accessor_buffers.length;
 			this.accessor_buffers.push({
 				componentType: 5126,
@@ -592,16 +647,26 @@ class GlTfExporter {
 		}
 
 		if(buffer_lists[0].weights) {
-			let weights_buffer = array_buffer_concat(...buffer_lists.map(item => {
-				assert(item.weights);
-				return item.weights;
-			}));
+			let weights_dv = new DataView(new ArrayBuffer(total_verts * 16));
+			let index = 0;
+			for(let list of buffer_lists) {
+				assert(list.weights != null)
+				let in_dv = new DataView(list.weights);
+				for(let i = 0; i < list.num_vertices; i++) {
+					for(let j = 0; j < 3; j++) {
+						weights_dv.setFloat32(index*16+j*4, in_dv.getFloat32(i*12+j*4, true), true);
+					}
+					weights_dv.setFloat32(index*16+12, 0, true);
+					index++;
+				}
+			}
+
 			mesh_primitive.attributes.WEIGHTS_0 = this.accessor_buffers.length;
 			this.accessor_buffers.push({
 				componentType: 5126,
-				buffer: weights_buffer,
+				buffer: weights_dv.buffer,
 				count: total_verts,
-				type: "VEC3"
+				type: "VEC4"
 			});
 		}
 
@@ -610,6 +675,11 @@ class GlTfExporter {
 				assert(item.joints);
 				return item.joints;
 			}));
+			let joints_arr = new Uint8Array(joints_buffer);
+			for(let i = 3; i < joints_arr.length; i += 4) joints_arr[i] = 0;
+			for(let i = 0; i < joints_arr.length; i++) {
+				this.max_bone_used = Math.max(this.max_bone_used, joints_arr[i]);
+			}
 			mesh_primitive.attributes.JOINTS_0 = this.accessor_buffers.length;
 			this.accessor_buffers.push({
 				componentType: 5121,
@@ -634,7 +704,33 @@ class GlTfExporter {
 					curr_start_index = i;
 					is_first = false;
 				}
-				if((i - curr_start_index) % 2) { // try to get some semblance of consistency with normals.
+				let swap_order = !((i - curr_start_index) % 2);
+				if(normals_arr.length) {
+					let base = [
+						verts_dv.getFloat32((list.vertex_start+i-2)*12 + 0, true),
+						verts_dv.getFloat32((list.vertex_start+i-2)*12 + 4, true),
+						verts_dv.getFloat32((list.vertex_start+i-2)*12 + 8, true),
+					] as Vec3;
+					let vec1 = [
+						verts_dv.getFloat32((list.vertex_start+i-1)*12 + 0, true) - base[0],
+						verts_dv.getFloat32((list.vertex_start+i-1)*12 + 4, true) - base[1],
+						verts_dv.getFloat32((list.vertex_start+i-1)*12 + 8, true) - base[2],
+					] as Vec3;
+					let vec2 = [
+						verts_dv.getFloat32((list.vertex_start+i)*12 + 0, true) - base[0],
+						verts_dv.getFloat32((list.vertex_start+i)*12 + 4, true) - base[1],
+						verts_dv.getFloat32((list.vertex_start+i)*12 + 8, true) - base[2],
+					] as Vec3;
+					let calc_normal = cross_product(vec1, vec2);
+
+					let avg_normal = [
+						normals_arr[(list.vertex_start+i-2)*3 + 0] + normals_arr[(list.vertex_start+i-1)*3 + 0] + normals_arr[(list.vertex_start+i)*3 + 0],
+						normals_arr[(list.vertex_start+i-2)*3 + 1] + normals_arr[(list.vertex_start+i-1)*3 + 1] + normals_arr[(list.vertex_start+i)*3 + 1],
+						normals_arr[(list.vertex_start+i-2)*3 + 2] + normals_arr[(list.vertex_start+i-1)*3 + 2] + normals_arr[(list.vertex_start+i)*3 + 2],
+					] as Vec3;
+					swap_order = dot_product(avg_normal, calc_normal) < 0;
+				}
+				if(!swap_order) { // try to get some semblance of consistency with normals.
 					indices.push(list.vertex_start+i-2);
 					indices.push(list.vertex_start+i-1);
 				} else {
