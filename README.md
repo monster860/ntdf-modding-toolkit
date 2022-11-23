@@ -33,7 +33,7 @@ Gamefile.from_iso(iso_blob).then(async gamefile => {
 	let modified_iso_blob = gamefile.patch_iso(iso_blob);
 	// Save the modified .iso file
 	const output_filename = './darkestfaerie-modified.iso';
-	Readable.from(modified_iso.stream()).pipe(createWriteStream(output_filename))
+	Readable.from(modified_iso_blob.stream()).pipe(createWriteStream(output_filename))
 });
 
 ```
