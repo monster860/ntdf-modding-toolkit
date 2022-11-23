@@ -107,7 +107,7 @@ export function encode_text(text : string) : Uint8Array {
 				let length_measure_mark = encoded_array.length;
 				encoded_array.push(2);
 				encoded_array.push(macro_number);
-				encoded_array.push(flags);
+				encoded_array.push(flags + 2);
 				for(let arg of arguments_arr) {
 					let as_array : number[];
 					if(arg instanceof Array) {
