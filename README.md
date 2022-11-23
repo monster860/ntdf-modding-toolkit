@@ -13,7 +13,8 @@ This library relies on JS's Blob objects. While these are supported in most brow
 ```js
 import { fileFromSync } from 'fetch-blob/from.js';
 import { Gamefile, ChunkType, MaterialsChunk } from 'ntdf-modding-toolkit';
-import { createWriteStream } from 'fs';
+import { createWriteStream } from 'node:fs';
+import { Readable } from 'node:stream';
 
 let iso_blob = fileFromSync("./darkestfaerie.iso");
 Gamefile.from_iso(iso_blob).then(async gamefile => {
@@ -30,7 +31,7 @@ Gamefile.from_iso(iso_blob).then(async gamefile => {
 	// Write the file back to the gamefile
 	gamefile.replace_chunk_file(0x38D, ellis_farm);
 	// Create a modified .iso file
-	let modified_iso_blob = gamefile.patch_iso(iso_blob);
+	let modified_iso_blob = await gamefile.patch_iso(iso_blob);
 	// Save the modified .iso file
 	const output_filename = './darkestfaerie-modified.iso';
 	Readable.from(modified_iso_blob.stream()).pipe(createWriteStream(output_filename))
